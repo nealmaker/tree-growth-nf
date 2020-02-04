@@ -24,6 +24,10 @@ load("C:/Users/Neal/projects/big-rdas/mort-model-full.rda")
 load("C:/Users/Neal/projects/big-rdas/dbh-growth-model-full.rda")
 load("C:/Users/Neal/projects/big-rdas/cr-growth-model-full.rda")
 load("C:/Users/Neal/projects/big-rdas/ht-model-full.rda")
+load("C:/Users/Neal/projects/tree-growth-nf/rda/dbh-ice.rda")
+load("C:/Users/Neal/projects/tree-growth-nf/rda/ht-ice.rda")
+load("C:/Users/Neal/projects/tree-growth-nf/rda/cr-ice.rda")
+load("C:/Users/Neal/projects/tree-growth-nf/rda/mort-ice.rda")
 ```
 
 ```{r results='asis'}
@@ -50,7 +54,7 @@ tibble(variable = rownames(varImp(dbh_growth_model_full)$importance),
   add_header_above(c(" " = 1, "submodel" =  4)) %>% 
   kable_styling(latex_options = "hold_position")
 ```
-.
+
 \pagebreak
 
 #Diameter Growth Submodel
@@ -95,6 +99,8 @@ error %>%
   facet_wrap(~ spp)
 ```
 
+\newpage
+
 ```{r, results='asis'}
 spp_RMSE <- error %>% 
   group_by(spp) %>% 
@@ -108,22 +114,47 @@ for (i in 1:length(spp_RMSE$spp)){
 
 kable(spp_RMSE, booktabs = T, linesep = "", digits = 4,
       caption = "Sample sizes and normalized root mean square errors by species") %>% 
-  kable_styling(latex_options = "hold_position")
+  kable_styling(latex_options = "HOLD_position")
 ```
 
-<!-- ##Partial dependence plots for individual predictors -->
+\vspace{100pt}
+\newpage
 
-```{r, fig.height=4}
-# for(i in 1:length(predictors(dbh_growth_model_full))){
-#   x <- pdp::partial(dbh_growth_model_full, 
-#                     pred.var = predictors(dbh_growth_model_full)[[i]], 
-#                     plot = T, plot.engine = "ggplot2")
-#   
-#   print(x)
-# }
+```{r, fig.height=2.5}
+
+for(i in 1:16){
+  print(autoplot(dbh_pdp_s[[i]], 
+                 ylab = "dbh growth (in/yr)", 
+                 main = paste("PDP for", 
+                              names(dbh_growth_model_full$trainingData)[[i]]),
+                 col = "#386cb0",
+                 size = 1.2) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(autoplot(dbh_ice[[i]], 
+                 ylab = "dbh growth (in/yr)", 
+                 main = paste("ICE plot for", 
+                              names(dbh_growth_model_full$trainingData)[[i]]), 
+                 pdp.size = 1.6, 
+                 pdp.color = "#386cb0", 
+                 alpha = .3) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(autoplot(dbh_ice_c[[i]],
+                 ylab = "dbh growth centered", 
+                 main = paste("Centered ICE plot for", 
+                              names(dbh_growth_model_full$trainingData)[[i]]),
+                 pdp.size = 1.6, 
+                 pdp.color = "#386cb0", 
+                 alpha = .3) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+}
 ```
-.
-\pagebreak
+
+\newpage
 
 #Height Submodel
 
@@ -163,6 +194,8 @@ error %>%
   facet_wrap(~ spp)
 ```
 
+\newpage
+
 ```{r, results='asis'}
 spp_RMSE <- error %>% 
   group_by(spp) %>% 
@@ -179,19 +212,44 @@ kable(spp_RMSE, booktabs = T, linesep = "", digits = 4,
   kable_styling(latex_options = "hold_position")
 ```
 
-<!-- ##Partial dependence plots for individual predictors -->
+\vspace{100pt}
+\newpage
 
-```{r, fig.height=4}
-# for(i in 1:length(predictors(ht_model_full))){
-#   x <- pdp::partial(ht_model_full, 
-#                     pred.var = predictors(ht_model_full)[[i]], 
-#                     plot = T, plot.engine = "ggplot2")
-#   
-#   print(x)
-# }
+```{r, fig.height=2.5}
+
+for(i in 1:16){
+  print(autoplot(ht_pdp_s[[i]], 
+                 ylab = "height (ft)", 
+                 main = paste("PDP for", 
+                              names(ht_model_full$trainingData)[[i]]),
+                 col = "#386cb0",
+                 size = 1.2) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(autoplot(ht_ice[[i]], 
+                 ylab = "height (ft)", 
+                 main = paste("ICE plot for", 
+                              names(ht_model_full$trainingData)[[i]]), 
+                 pdp.size = 1.6, 
+                 pdp.color = "#386cb0", 
+                 alpha = .3) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(autoplot(ht_ice_c[[i]],
+                 ylab = "height centered", 
+                 main = paste("Centered ICE plot for", 
+                              names(ht_model_full$trainingData)[[i]]),
+                 pdp.size = 1.6, 
+                 pdp.color = "#386cb0", 
+                 alpha = .3) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+}
 ```
-.
-\pagebreak
+
+\newpage
 
 #Crown Ratio Change Submodel
 
@@ -231,6 +289,8 @@ error %>%
   facet_wrap(~ spp)
 ```
 
+\newpage
+
 ```{r, results='asis'}
 spp_RMSE <- error %>% 
   group_by(spp) %>% 
@@ -247,19 +307,44 @@ kable(spp_RMSE, booktabs = T, linesep = "", digits = 4,
   kable_styling(latex_options = "hold_position")
 ```
 
-<!-- ##Partial dependence plots for individual predictors -->
+\vspace{100pt}
+\newpage
 
-```{r, fig.height=4}
-# for(i in 1:length(predictors(cr_growth_model_full))){
-#   x <- pdp::partial(cr_growth_model_full, 
-#                     pred.var = predictors(cr_growth_model_full)[[i]], 
-#                     plot = T, plot.engine = "ggplot2")
-#   
-#   print(x)
-# }
+```{r, fig.height=2.5}
+
+for(i in 1:16){
+  print(autoplot(cr_pdp_s[[i]], 
+                 ylab = "annual crown ratio change (%)", 
+                 main = paste("PDP for", 
+                              names(cr_growth_model_full$trainingData)[[i]]),
+                 col = "#386cb0",
+                 size = 1.2) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(autoplot(cr_ice[[i]], 
+                 ylab = "annual crown ratio change (%)", 
+                 main = paste("ICE plot for", 
+                              names(cr_growth_model_full$trainingData)[[i]]), 
+                 pdp.size = 1.6, 
+                 pdp.color = "#386cb0", 
+                 alpha = .3) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(autoplot(cr_ice_c[[i]],
+                 ylab = "crown ratio change centered", 
+                 main = paste("Centered ICE plot for", 
+                              names(cr_growth_model_full$trainingData)[[i]]),
+                 pdp.size = 1.6, 
+                 pdp.color = "#386cb0", 
+                 alpha = .3) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+}
 ```
-.
-\pagebreak
+
+\newpage
 
 #Survival Submodel
 
@@ -301,14 +386,39 @@ result.roc <- roc(y, y_hat_prob$lived) # Calculate ROC curve
 plot(result.roc, print.auc = T) #plot ROC with AUC on it
 ```
 
-<!-- ##Partial dependence plots for individual predictors -->
+\vspace{100pt}
+\newpage
 
-```{r, fig.height=4}
-# for(i in 1:length(predictors(mort_model_full))){
-#   x <- pdp::partial(ht_model_full, 
-#                     pred.var = predictors(ht_model_full)[[i]], 
-#                     plot = T, plot.engine = "ggplot2")
-#   
-#   print(x)
-# }
+```{r, fig.height=2.5}
+
+for(i in 1:17){
+  print(autoplot(mort_pdp_s[[i]], 
+                 ylab = "probability of dying", 
+                 main = paste("PDP for", 
+                              names(mort_model_full$trainingData)[[i]]),
+                 col = "#386cb0",
+                 size = 1.2) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(autoplot(mort_ice[[i]], 
+                 ylab = "probability of dying", 
+                 main = paste("ICE plot for", 
+                              names(mort_model_full$trainingData)[[i]]), 
+                 pdp.size = 1.6, 
+                 pdp.color = "#386cb0", 
+                 alpha = .3) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(autoplot(mort_ice_c[[i]],
+                 ylab = "probability of dying centered", 
+                 main = paste("Centered ICE plot for", 
+                              names(mort_model_full$trainingData)[[i]]),
+                 pdp.size = 1.6, 
+                 pdp.color = "#386cb0", 
+                 alpha = .3) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+}
 ```
