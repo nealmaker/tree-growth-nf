@@ -113,6 +113,50 @@ save(ht_ice, ht_ice_c, ht_pdp_s, file = "rda/ht-ice.rda")
 
 
 #########################################
+## Height Growth (feet per year)
+#########################################
+
+ht_growth_ice <- vector(mode = "list", length = 16)
+ht_growth_ice_c <- vector(mode = "list", length = 16)
+ht_growth_pdp_s <- vector(mode = "list", length = 16)
+
+# ICE plots
+# 4 minutes run time
+for(i in 1:16){
+  ht_growth_ice[[i]] <- 
+    pdp::partial(ht_growth_model_full, 
+                 pred.var = names(ht_growth_model_full$trainingData)[[i]], 
+                 ice = T, 
+                 train = ht_growth_model_full$
+                   trainingData[sample(1:nrow(ht_growth_model_full$trainingData),
+                                       200), -17]) # 200 lines per plot
+}
+
+# Centered ICE plots
+for(i in 1:16){
+  ht_growth_ice_c[[i]] <- 
+    pdp::partial(ht_growth_model_full, 
+                 pred.var = names(ht_growth_model_full$trainingData)[[i]], 
+                 ice = T, center = T,
+                 train = ht_growth_model_full$
+                   trainingData[sample(1:nrow(ht_growth_model_full$trainingData),
+                                       200), -17]) # 200 lines per plot
+}
+
+# Single factor pdps
+for(i in 1:16){
+  ht_growth_pdp_s[[i]] <- 
+    pdp::partial(ht_growth_model_full, 
+                 pred.var = names(ht_growth_model_full$trainingData)[[i]], 
+                 train = ht_growth_model_full$
+                   trainingData[sample(1:nrow(ht_growth_model_full$trainingData),
+                                       1000), -17]) # 1000 lines averaged
+}
+
+save(ht_growth_ice, ht_growth_ice_c, ht_growth_pdp_s, file = "rda/ht-growth-ice.rda")
+
+
+#########################################
 ## CR Growth (change in percent per year)
 #########################################
 

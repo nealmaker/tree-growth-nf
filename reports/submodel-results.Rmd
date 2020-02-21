@@ -24,19 +24,22 @@ load("C:/Users/Neal/projects/big-rdas/mort-model-full.rda")
 load("C:/Users/Neal/projects/big-rdas/dbh-growth-model-full.rda")
 load("C:/Users/Neal/projects/big-rdas/cr-growth-model-full.rda")
 load("C:/Users/Neal/projects/big-rdas/ht-model-full.rda")
+load("C:/Users/Neal/projects/big-rdas/ht-growth-model-full.rda")
 load("C:/Users/Neal/projects/tree-growth-nf/rda/dbh-ice.rda")
 load("C:/Users/Neal/projects/tree-growth-nf/rda/ht-ice.rda")
 load("C:/Users/Neal/projects/tree-growth-nf/rda/cr-ice.rda")
 load("C:/Users/Neal/projects/tree-growth-nf/rda/mort-ice.rda")
+load("C:/Users/Neal/projects/tree-growth-nf/rda/ht-growth-ice.rda")
 ```
 
 ```{r results='asis'}
 tibble(variable = rownames(varImp(dbh_growth_model_full)$importance),
                  dbh_growth = varImp(dbh_growth_model_full)$importance$Overall,
                  height = varImp(ht_model_full)$importance$Overall,
+                 height_growth = varImp(ht_growth_model_full)$importance$Overall,
                  cr_growth = varImp(cr_growth_model_full)$importance$Overall,
                  mort = varImp(mort_model_full)$importance$Overall[-1],
-                 mean = (dbh_growth + height + cr_growth + mort)/4) %>% 
+                 mean = (dbh_growth + height + height_growth + cr_growth + mort)/5) %>% 
   arrange(desc(mean)) %>% 
   select(-mean) %>%
   mutate(variable = gsub("_", " ", variable)) %>% 
@@ -44,14 +47,15 @@ tibble(variable = rownames(varImp(dbh_growth_model_full)$importance),
     cell_spec(round(x), background = spec_color(x, option = "C"))
   }) %>% 
   kable(booktabs = T, escape = F, linesep = "",
-        align = c("l", "c", "c", "c", "c"),
+        align = c("l", "c", "c", "c", "c", "c"),
         col.names = c("variable",
                       "$\\Delta$dbh",
                       "height",
+                      "$\\Delta$height",
                       "$\\Delta$cr",
                       "survival"),
         caption = "Scaled variable importance measures for predictors in individual submodels. Calculated on out of bag data using 'impurity' measure. The most important predictor for each model is ranked 100 and the least important is ranked 0.") %>% 
-  add_header_above(c(" " = 1, "submodel" =  4)) %>% 
+  add_header_above(c(" " = 1, "submodel" =  5)) %>% 
   kable_styling(latex_options = "hold_position")
 ```
 
@@ -241,6 +245,101 @@ for(i in 1:16){
                  ylab = "height centered", 
                  main = paste("Centered ICE plot for", 
                               names(ht_model_full$trainingData)[[i]]),
+                 pdp.size = 1.6, 
+                 pdp.color = "#386cb0", 
+                 alpha = .3) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+}
+```
+
+\newpage
+
+#Height Growth Submodel
+
+```{r, results='asis'}
+getTrainPerf(ht_growth_model_full)[,1:3] %>% 
+  kable(booktabs = T, linesep = "", digits = c(6,3,6),
+        col.names = c("RMSE", "R^2", "MAE"),
+        caption = "Accuracy estimates, calculated on out of bag data") %>% 
+  kable_styling(position = "center",
+                latex_options = "hold_position")
+```
+
+```{r, fig.cap="Overall error distribution estimated with kernal density."}
+error <- tibble(spp = ht_growth_model_full$trainingData$spp, 
+              y = ht_growth_model_full$trainingData$.outcome,
+              y_hat = ht_growth_model_full$finalModel$predictions,
+              err = y - y_hat)
+
+error %>% ggplot(aes(err)) +
+  geom_density(fill = "dark gray") +
+  xlab("error (ft/yr)") +
+  theme(text = element_text(family = "Perpetua"))
+```
+
+```{r, fig.cap="Error distributions for individual species estimated with kernal density. Blue vertical lines indicate 0 (no error). Brown vertical lines indicate mean species errors."}
+error %>% 
+  group_by(spp) %>% 
+  mutate(err_mean = mean(err)) %>% 
+  ungroup() %>% 
+  ggplot(aes(err)) +
+  geom_density(fill = "dark gray") +
+  xlab("error (ft/yr)") +
+  theme(text = element_text(family = "Perpetua"),
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_vline(xintercept = 0, col = "#386cb0", size = 1) +
+  geom_vline(aes(xintercept = err_mean), col = "#bf5b17", size = 1) +
+  facet_wrap(~ spp)
+```
+
+\newpage
+
+```{r, results='asis'}
+spp_RMSE <- error %>% 
+  group_by(spp) %>% 
+  summarize(n = n(), nRMSE = 0) %>% 
+  arrange(desc(n))
+
+for (i in 1:length(spp_RMSE$spp)){
+  x <- filter(error, spp == spp_RMSE$spp[[i]])
+  spp_RMSE[i, 3] <- RMSE(x$y, x$y_hat)/mean(x$y)
+}
+
+kable(spp_RMSE, booktabs = T, linesep = "", digits = 4,
+      caption = "Sample sizes and normalized root mean square errors by species") %>% 
+  kable_styling(latex_options = "HOLD_position")
+```
+
+\vspace{100pt}
+\newpage
+
+```{r, fig.height=2.5}
+
+for(i in 1:16){
+  print(autoplot(ht_growth_pdp_s[[i]], 
+                 ylab = "height growth (ft/yr)", 
+                 main = paste("PDP for", 
+                              names(ht_growth_model_full$trainingData)[[i]]),
+                 col = "#386cb0",
+                 size = 1.2) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(autoplot(ht_growth_ice[[i]], 
+                 ylab = "height growth (ft/yr)", 
+                 main = paste("ICE plot for", 
+                              names(ht_growth_model_full$trainingData)[[i]]), 
+                 pdp.size = 1.6, 
+                 pdp.color = "#386cb0", 
+                 alpha = .3) +
+          theme(text = element_text(family = "Perpetua"),
+                axis.text.x = element_text(angle = 45, hjust = 1)))
+  
+  print(autoplot(ht_growth_ice_c[[i]],
+                 ylab = "height growth centered", 
+                 main = paste("Centered ICE plot for", 
+                              names(ht_growth_model_full$trainingData)[[i]]),
                  pdp.size = 1.6, 
                  pdp.color = "#386cb0", 
                  alpha = .3) +
