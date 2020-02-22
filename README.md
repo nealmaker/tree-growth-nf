@@ -8,7 +8,7 @@ Some notes:
   - Using fia's rate gives a very acurate model (that's what we used), using (dbh_e - dbh_s)/interval does not
 - ht_rate as calculated by fia does equal (ht_e - ht_s)/interval, and there's a lot of measurement error
   - 30% of observations have negative ht growth rates
-  - The model has very low accuracy
+  - The model has very low accuracy (r^2 of .1) and 15% of predictions are negative
   - Perhaps the ht rates could be processed in the same way the fia processed dbh rates to give better results
-- bal is calculated based on all trees in each subplot. Does that include big and little trees, or are we getting weird numbers because we need to combine data from regen plots and overstory plots?
-- Independent test data is reserved by holding back data from 20% of unique plot IDs, but some of those could be plots in the training data, measured at a different time (each remeasurement gets a new plot ID). We should probably figure out which plots were remeasured multiple times and account for it explicitly. 
+- bal is calculated based on all trees in each subplot. Does that include big and little trees (do the regen and overstory plots share a subplot ID), or are we getting weird numbers because we need to combine data from regen and overstory plots?
+- Independent test data is reserved by holding back data from 20% of unique plot IDs (PLT_CN for plot at end of remeasurement period), but some of those could be plots in the training data, measured at a different time (each remeasurement gets a new plot ID). We should probably figure out which plots were remeasured multiple times and account for it explicitly. 
