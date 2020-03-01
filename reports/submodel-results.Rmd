@@ -1,6 +1,6 @@
 ---
 title: "Tree Growth Submodels for the US Northern Forest"
-subtitle: "Results and Analysis"
+subtitle: "Estimated Results and Analysis"
 author: "Neal Maker & John Foppert"
 date: "`r lubridate::today()`"
 output: 
