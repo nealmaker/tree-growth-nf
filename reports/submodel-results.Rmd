@@ -94,10 +94,8 @@ error %>%
   xlab("error (in/yr)") +
   theme(text = element_text(family = "Perpetua"),
         axis.text.x = element_text(angle = 45, hjust = 1)) +
-  scale_y_continuous(limits = c(0,200),
-                     breaks = c(0,100,200)) +
-  scale_x_continuous(breaks = c(-0.04, 0, 0.04),
-                     limits = c(-0.04, 0.04)) +
+  scale_x_continuous(breaks = c(-0.2, 0, 0.2),
+                     limits = c(-0.2, 0.2)) +
   geom_vline(xintercept = 0, col = "#386cb0", size = 1) +
   geom_vline(aes(xintercept = err_mean), col = "#bf5b17", size = 1) +
   facet_wrap(~ spp)
