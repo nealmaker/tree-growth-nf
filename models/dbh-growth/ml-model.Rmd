@@ -1,6 +1,6 @@
 ---
-title: "DBH Increment Model"
-subtitle: "for the Northern Forest"
+title: "DBH Increment Model for the Northern Forest"
+subtitle: "using a machine learning approach"
 author: "Neal Maker"
 output: html_notebook
 ---
@@ -12,7 +12,7 @@ library("tidyverse")
 library("caret")
 ```
 
-## Project Goals
+## Goals
 
 1. Spot check numerous algorithms for modeling tree diameter growth, which represent a diversity of methodologies. Focus on:
   - model accuracy
@@ -23,7 +23,6 @@ library("caret")
   - parameter optimization with grid- or hyperparameter-searching
   - species-specific models in place of unified models
 3. Train a 'best case' model for use in simulator
-4. Re-parameterize existing, published models on this dataset for comparison
 
 ## Data
 
@@ -49,13 +48,13 @@ nf_fia <- nf_fia %>%
 })})
 ```
 
-Forest Inventory and Analysis data were used from the US Northern Forest region. They consist of observations of `r nrow(nf_fia)` remeasured trees, located in `r length(unique(nf_fia[, ncol(nf_fia)]))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/fia-data-nf).
+Forest Inventory and Analysis data were used from the US Northern Forest region. They consist of observations of `r nrow(nf_fia)` remeasured trees, located in `r length(unique(nf_fia[, ncol(nf_fia)]))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/tree-growth-nf).
 
 The data include `r ncol(nf_fia) - 2` potential predictors, which include individual tree attributes as well as plot-level attributes and site attributes. Three of the predictors began as non-ordinal categorical variables, and the rest were numeric.
 
 ## Preprocessing and Splitting
 
-The three categorical variables were re-coded using one-hot encoding, to allow for their incorporation in various regression models. Many of the predictors are related to species-specific plot basal area and species-specific overtopping basal area. These are often unbalanced (the majority of observations are 0) and have very low variance, but may still be informative, much like dummy variables. For this reason features with near-zero variance were retained for the time being. 
+The three categorical variables were re-coded using one-hot encoding, to allow for their incorporation in various regression models. Many of the predictors are related to species-specific plot basal area and species-specific overtopping basal area. These are often unbalanced (the majority of observations are 0) and have very low variance, but may still be informative, much like dummy variables. For this reason features with near-zero variance were retained to start. 
 
 ```{r preprocess, cache=TRUE}
 dbh_rates <- nf_fia$dbh_rate
@@ -454,7 +453,7 @@ lasso_sppspec_rmse %>%
   labs(title = "Accuracies of species-specific lasso models")
 ```
 
-Average root mean square errors for the refined models range from `r round(min(summary(results)$statistics$RMSE[,4]), 3)` to `r round(max(summary(results)$statistics$RMSE[,4]), 3)` inches per year, excluding the species-specific lasso. The lasso's species-specific submodels had root mean square errors ranging from `r round(min(summary(lasso_results)$statistics$RMSE[,4]), 3)` to `r round(max(summary(lasso_results)$statistics$RMSE[,4]), 3)` inches per year, with an median submodel RMSE of `r round(median(summary(results)$statistics$RMSE[,4]), 3)` inches per year.
+Average root mean square errors for the refined models range from `r round(min(summary(results)$statistics$RMSE[,4]), 3)` to `r round(max(summary(results)$statistics$RMSE[,4]), 3)` inches per year, excluding the species-specific lasso. The lasso's species-specific submodels had root mean square errors ranging from `r round(min(summary(lasso_results)$statistics$RMSE[,4]), 3)` to `r round(max(summary(lasso_results)$statistics$RMSE[,4]), 3)` inches per year, with a median submodel RMSE of `r round(median(summary(results)$statistics$RMSE[,4]), 3)` inches per year.
 
 ```{r secondPredtimes, fig.cap="Prediction times for refined algorithms, based on 30 random samples of 1,000 trees each.", cache=FALSE}
 predtimes %>% 
@@ -629,9 +628,9 @@ predtimes <- sapply(1:30, function(k) {
 
 var_imp <- varImp(fit.best, scale = F)
 
-# STOP!! Too big for GitHub. Don't commit. ------------------------
-# dbh_growth_model <- fit.best
-# save(dbh_growth_model, var_imp_dbh, file = "../big-rdas/dbh-growth-model-best.rda")
+# save final model
+dbh_growth_model <- fit.best
+save(dbh_growth_model, var_imp_dbh, file = "dbh-growth-model-best.rda")
 ```
 
 This final model has an estimated RMSE of `r round(mean(fit.best$resample[, 1]), 4)` inches per year, calculated with cross validation on the the training data. It averages `r mean(predtimes)` seconds to make 1,000 predictions (on this computer) and takes up `r lobstr::obj_size(fit.best$finalModel) / 1000000` megabytes in memory. 
