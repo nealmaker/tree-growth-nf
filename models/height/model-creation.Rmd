@@ -1,5 +1,5 @@
 ---
-title: "DBH Increment Model"
+title: "Tree Height Model"
 subtitle: "for the Northern Forest"
 author: "Neal Maker"
 output: html_notebook
@@ -14,7 +14,7 @@ library("caret")
 
 ## Project Goals
 
-1. Spot check numerous algorithms for modeling tree diameter growth, which represent a diversity of methodologies. Focus on:
+1. Spot check numerous algorithms for modeling tree height, which represent a diversity of methodologies. Focus on:
   - model accuracy
   - size of model object (to address memory concerns in simulator)
   - prediction time
@@ -36,20 +36,20 @@ download.file(
   temp)
 load(temp)
 
-# remove trees that died and unwanted variables
+# remove unwanted variables
 nf_fia <- nf_fia %>%
-  filter(status_change == "lived") %>% 
-  select(dbh_rate, spp, dbh_mid, cr_mid, crown_class_s, tree_class_s,
-         ba_mid, bal_mid, forest_type_s, stocking_s, landscape, 
+  filter(!is.na(ht_s)) %>% 
+  select(ht_s, spp, dbh_s, cr_s, crown_class_s, tree_class_s,
+         ba_s, bal_s, forest_type_s, stocking_s, landscape, 
          site_class, slope, aspect, lat, lon, elev, ba_ash:bal_yellow.birch, 
          plot) %>% 
-  rename(dbh = dbh_mid, cr = cr_mid, crown_class = crown_class_s,
-         tree_class = tree_class_s, ba = ba_mid, bal = bal_mid,
+  rename(ht = ht_s, dbh = dbh_s, cr = cr_s, crown_class = crown_class_s,
+         tree_class = tree_class_s, ba = ba_s, bal = bal_s,
          forest_type = forest_type_s, stocking = stocking_s)
 })})
 ```
 
-Forest Inventory and Analysis data were used from the US Northern Forest region. They consist of observations of `r nrow(nf_fia)` remeasured trees, located in `r length(unique(nf_fia[, ncol(nf_fia)]))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/fia-data-nf).
+Forest Inventory and Analysis data were used from the US Northern Forest region. They consist of observations of `r nrow(nf_fia)` remeasured trees, located in `r length(unique(nf_fia[, ncol(nf_fia)]))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/tree-growth-nf).
 
 The data include `r ncol(nf_fia) - 2` potential predictors, which include individual tree attributes as well as plot-level attributes and site attributes. Three of the predictors began as non-ordinal categorical variables, and the rest were numeric.
 
@@ -58,20 +58,14 @@ The data include `r ncol(nf_fia) - 2` potential predictors, which include indivi
 The three categorical variables were re-coded using one-hot encoding, to allow for their incorporation in various regression models. Many of the predictors are related to species-specific plot basal area and species-specific overtopping basal area. These are often unbalanced (the majority of observations are 0) and have very low variance, but may still be informative, much like dummy variables. For this reason features with near-zero variance were retained for the time being. 
 
 ```{r preprocess, cache=TRUE}
-dbh_rates <- nf_fia$dbh_rate
+hts <- nf_fia$ht
 plots <- nf_fia$plot
 
 # one-hot encoding for categorical factors (but not plot)
 nf_fia <- select(nf_fia, -plot)
 
-dummies <- dummyVars(dbh_rate ~ ., data = nf_fia)
+dummies <- dummyVars(ht ~ ., data = nf_fia)
 features <- predict(dummies, newdata = nf_fia)
-
-# remove features with near-zero variance
-# THIS WOULD REMOVE MOST ONE-HOTS AND SPP-SPEC BA/BALs
-# nzv <- nearZeroVar(nf_fia)
-# out <- nf_fia[, -nzv]
-# dim(out)
 ```
 
 ```{r split, cache=TRUE}
@@ -86,9 +80,9 @@ test_plots <- sample(unique(plots),
 
 index <- which(plots %in% test_plots)
 train <- features[-index, ]
-trainy <- dbh_rates[-index]
+trainy <- hts[-index]
 test <- features[index, ]
-testy <- dbh_rates[index]
+testy <- hts[index]
 
 # sample from training data to expediate algorithm testing
 subsamp_size <- 6000
@@ -125,6 +119,10 @@ fit.glmnet <- train(x, y, method = 'glmnet', metric=metric,
 # neural network (one layer)
 set.seed(seed)
 fit.nnet <- train(x, y, method = 'nnet', metric=metric, 
+                  preProc=c("center", "scale"), trControl=control)
+# neural network (multilayer perceptron)
+set.seed(seed)
+fit.mlp <- train(x, y, method = 'mlp', metric=metric, 
                   preProc=c("center", "scale"), trControl=control)
 # linear support vector machine
 set.seed(seed)
@@ -170,10 +168,6 @@ fit.earth <- train(x, y, method = 'earth', metric=metric,
 set.seed(seed)
 fit.cubist <- train(x, y, method = 'cubist', metric=metric,
                   preProc=c("center", "scale"), trControl=control)
-# regularized random forest WICKED SLOW! (AND NOT WORTH THE FUSS)
-# set.seed(seed)
-# fit.rrf <- train(x, y, method = 'RRFglobal', metric=metric,
-#                   preProc=c("center", "scale"), trControl=control)
 
 stopCluster(cl)
 })})
@@ -214,6 +208,7 @@ stopCluster(cl)
 fits <- list(
   glmnet = fit.glmnet,
   nnet = fit.nnet,
+  mlp = fit.mlp,
   svmLinear = fit.svmLinear,
   svmRadial = fit.svmRadial,
   knn = fit.knn,
@@ -223,9 +218,8 @@ fits <- list(
   gbm = fit.gbm,
   lm = fit.lm,
   penalized = fit.penalized,
-  mars = fit.earth, 
+  earth = fit.earth, 
   cubist = fit.cubist,
-  # rrf = fit.rrf,
   ridge = fit.ridge,
   lasso = fit.lasso,
   bridge = fit.bridge,
@@ -276,16 +270,13 @@ data.frame(model = names(fits), size = sizes) %>%
   coord_flip() +
   scale_y_continuous(name = "model size (megabytes)")
 ```
+There was little difference in accuracy between most of the algorithms in the spot check. Interestingly, the neural networks (nnet and mlp) were an exception, performing noticeably worse than the other algorithms. The cubist, random forest, and gradient boosting machines were the most accurate overall, but a host of other algorithms were very close behind.
 
-The spot-checking demonstrated that non-linear methods like model trees, random forests, gradient boosting machines, and neural networks tend to be the most accurate in this case. Regularized parametric models are not as accurate, but are notable because they tend to be smaller and faster at making predictions. Their accuracy might also be improved by building species-specific models, as the species information was encoded in dummy variables and much of it was removed before spot checking them.
-
-Of the non-linear models, the gradient boosting machine (gbm) looks to be the best compromise, offering high accuracies with relatively short prediction times in a smallish package. The single layer neural network that was checked (nnet) also represents a nice compromise, though it doesn't score quite as well as the gbm in any category.
-
-There was one L1-L2 regularized model (the generalized linear model glmnet) that was succesfully checked using near-zero variance features, and it scored similarly to the gbm and nnet in all three categories. It used a gaussian formula with lasso regularization in its default setting. The other L1 and L2 regularized models all show promise as well, especially if more information about species could be folded in to improve accuracies. Ridge regression, lasso, and elasticnet (enet) are virtually indistinguishable in size, speed, and accuracy, and are the smallest and fastest of all the algorithms in the spot-check.
+Spot checked algorithms were more stratified in relation to prediction time and model size. L1- and L2-regularized models were generally the fastest and smallest, while gradient boosting machines, regularized general linear models, and linear support vector machines occupied a middle ground. Radial support vector machines, k-nearest neighbor, and cubist were notably slow. Random forests and bagged regression trees were notably large.
 
 ##  Promising Algorithms
 
-To further winnow possible algorithms, four were explored in more depth: the gbm, the nnet, the glmnet, and the lasso. These were trained on all of the training data, and a grid search was used to optimize their tuning parameters. Each was tried with and without feature selection (fs), which consisted of removing predictors with near-zero variance and removing highly correlated predictors. The lasso was trained with one-hot encoding and feature selection, like the other models, and also without one-hot encoding using species-specific submodels to fully capture species effects.
+To further winnow possible algorithms, four of the most promising were explored in more depth: the gradient boosting machine gbm, the multivariate adaptive regression spline earth, the linear support vector machine svmLinear, and the lasso. These were trained on all of the training data, and a grid search was used to optimize their tuning parameters. Each was tried with and without feature selection (fs), which consisted of removing predictors with near-zero variance and removing highly correlated predictors. The lasso was trained with one-hot encoding and feature selection, like the other models, and also without one-hot encoding using species-specific submodels to fully capture species effects.
 
 ```{r clean_spot}
 # remove spot-checking objects
@@ -322,44 +313,49 @@ stopCluster(cl)
 })})
 ```
 
-```{r nnet}
+```{r earth}
 invisible({capture.output({
   
 # train in parallel to speed
 cl <- makePSOCKcluster(10)
 registerDoParallel(cl)
 
-set.seed(seed)
-fit.nnet <- train(train, trainy, method = 'nnet', metric=metric, 
-                 preProc=c("center", "scale"), trControl=control, verbose=FALSE,
-                 tuneLength = 5) # number of values for each tuning param
+# BOTH FAILED WITH ERR: all RMSE metric values are missing ###################################################
 
-fit.nnet.fs <- train(train_fs, trainy, method = 'nnet', metric=metric, 
-                 preProc=c("center", "scale"), trControl=control, verbose=FALSE,
-                 tuneLength = 5)
+# set.seed(seed)
+# fit.earth <- train(train, trainy, method = 'earth', metric=metric, 
+#                  preProc=c("center", "scale"), trControl=control, verbose=FALSE,
+#                  tuneLength = 5) # number of values for each tuning param
+# 
+# fit.earth.fs <- train(train_fs, trainy, method = 'earth', metric=metric, 
+#                  preProc=c("center", "scale"), trControl=control, verbose=FALSE,
+#                  tuneLength = 5)
 
 stopCluster(cl)
 })})
 ```
 
-```{r glmnet}
-invisible({capture.output({
-  
-# train in parallel to speed
-cl <- makePSOCKcluster(10)
-registerDoParallel(cl)
+```{r svmLinear}
 
-set.seed(seed)
-fit.glmnet <- train(train, trainy, method = 'glmnet', metric=metric, 
-                 preProc=c("center", "scale"), trControl=control, verbose=FALSE,
-                 tuneLength = 5) # number of values for each tuning param
+#### RAN FOR MORE THAN A DAY (whole invisible chunk) AND I TERMIINATED ########################################
 
-fit.glmnet.fs <- train(train_fs, trainy, method = 'glmnet', metric=metric, 
-                 preProc=c("center", "scale"), trControl=control, verbose=FALSE,
-                 tuneLength = 5)
-
-stopCluster(cl)
-})})
+# invisible({capture.output({
+#   
+# # train in parallel to speed
+# cl <- makePSOCKcluster(10)
+# registerDoParallel(cl)
+# 
+# set.seed(seed)
+# fit.svmLinear <- train(train, trainy, method = 'svmLinear', metric=metric, 
+#                  preProc=c("center", "scale"), trControl=control, verbose=FALSE,
+#                  tuneLength = 5) # number of values for each tuning param
+# 
+# fit.svmLinear.fs <- train(train_fs, trainy, method = 'svmLinear', metric=metric, 
+#                  preProc=c("center", "scale"), trControl=control, verbose=FALSE,
+#                  tuneLength = 5)
+# 
+# stopCluster(cl)
+# })})
 ```
 
 ```{r lasso}
@@ -398,12 +394,12 @@ predict.lasso <- function(data) {
 
 ```{r compileSecond}
 fits <- list(
-  glmnet = fit.glmnet,
-  glmnet_nzv = fit.glmnet.fs,
-  nnet = fit.nnet,
-  nnet_nzv = fit.nnet.fs,
   gbm = fit.gbm,
-  gbm_nzv = fit.gbm.fs,
+  gbm_fs = fit.gbm.fs,
+  earth = fit.earth,
+  earth_fs = fit.earrh.fs,
+  svmLinear = fit.nnet,
+  svmLinear_fs = fit.nnet.fs,
   lasso_onehot = fit.lasso.fs)
 
 results <- resamples(fits)

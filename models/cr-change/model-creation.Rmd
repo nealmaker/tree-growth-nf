@@ -1,5 +1,5 @@
 ---
-title: "DBH Increment Model"
+title: "Crown Ratio Change Model"
 subtitle: "for the Northern Forest"
 author: "Neal Maker"
 output: html_notebook
@@ -14,7 +14,7 @@ library("caret")
 
 ## Project Goals
 
-1. Spot check numerous algorithms for modeling tree diameter growth, which represent a diversity of methodologies. Focus on:
+1. Spot check numerous algorithms for modeling crown ratio change, which represent a diversity of methodologies. Focus on:
   - model accuracy
   - size of model object (to address memory concerns in simulator)
   - prediction time
@@ -39,7 +39,7 @@ load(temp)
 # remove trees that died and unwanted variables
 nf_fia <- nf_fia %>%
   filter(status_change == "lived") %>% 
-  select(dbh_rate, spp, dbh_mid, cr_mid, crown_class_s, tree_class_s,
+  select(cr_rate, spp, dbh_mid, cr_mid, crown_class_s, tree_class_s,
          ba_mid, bal_mid, forest_type_s, stocking_s, landscape, 
          site_class, slope, aspect, lat, lon, elev, ba_ash:bal_yellow.birch, 
          plot) %>% 
@@ -49,7 +49,7 @@ nf_fia <- nf_fia %>%
 })})
 ```
 
-Forest Inventory and Analysis data were used from the US Northern Forest region. They consist of observations of `r nrow(nf_fia)` remeasured trees, located in `r length(unique(nf_fia[, ncol(nf_fia)]))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/fia-data-nf).
+Forest Inventory and Analysis data were used from the US Northern Forest region. They consist of observations of `r nrow(nf_fia)` remeasured trees, located in `r length(unique(nf_fia[, ncol(nf_fia)]))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/tree-growth-nf).
 
 The data include `r ncol(nf_fia) - 2` potential predictors, which include individual tree attributes as well as plot-level attributes and site attributes. Three of the predictors began as non-ordinal categorical variables, and the rest were numeric.
 
@@ -58,20 +58,14 @@ The data include `r ncol(nf_fia) - 2` potential predictors, which include indivi
 The three categorical variables were re-coded using one-hot encoding, to allow for their incorporation in various regression models. Many of the predictors are related to species-specific plot basal area and species-specific overtopping basal area. These are often unbalanced (the majority of observations are 0) and have very low variance, but may still be informative, much like dummy variables. For this reason features with near-zero variance were retained for the time being. 
 
 ```{r preprocess, cache=TRUE}
-dbh_rates <- nf_fia$dbh_rate
+cr_rates <- nf_fia$cr_rate
 plots <- nf_fia$plot
 
 # one-hot encoding for categorical factors (but not plot)
 nf_fia <- select(nf_fia, -plot)
 
-dummies <- dummyVars(dbh_rate ~ ., data = nf_fia)
+dummies <- dummyVars(cr_rate ~ ., data = nf_fia)
 features <- predict(dummies, newdata = nf_fia)
-
-# remove features with near-zero variance
-# THIS WOULD REMOVE MOST ONE-HOTS AND SPP-SPEC BA/BALs
-# nzv <- nearZeroVar(nf_fia)
-# out <- nf_fia[, -nzv]
-# dim(out)
 ```
 
 ```{r split, cache=TRUE}
@@ -86,9 +80,9 @@ test_plots <- sample(unique(plots),
 
 index <- which(plots %in% test_plots)
 train <- features[-index, ]
-trainy <- dbh_rates[-index]
+trainy <- cr_rates[-index]
 test <- features[index, ]
-testy <- dbh_rates[index]
+testy <- cr_rates[index]
 
 # sample from training data to expediate algorithm testing
 subsamp_size <- 6000
@@ -125,6 +119,10 @@ fit.glmnet <- train(x, y, method = 'glmnet', metric=metric,
 # neural network (one layer)
 set.seed(seed)
 fit.nnet <- train(x, y, method = 'nnet', metric=metric, 
+                  preProc=c("center", "scale"), trControl=control)
+# neural network (multilayer perceptron)
+set.seed(seed)
+fit.mlp <- train(x, y, method = 'mlp', metric=metric, 
                   preProc=c("center", "scale"), trControl=control)
 # linear support vector machine
 set.seed(seed)
@@ -170,10 +168,6 @@ fit.earth <- train(x, y, method = 'earth', metric=metric,
 set.seed(seed)
 fit.cubist <- train(x, y, method = 'cubist', metric=metric,
                   preProc=c("center", "scale"), trControl=control)
-# regularized random forest WICKED SLOW! (AND NOT WORTH THE FUSS)
-# set.seed(seed)
-# fit.rrf <- train(x, y, method = 'RRFglobal', metric=metric,
-#                   preProc=c("center", "scale"), trControl=control)
 
 stopCluster(cl)
 })})
@@ -214,6 +208,7 @@ stopCluster(cl)
 fits <- list(
   glmnet = fit.glmnet,
   nnet = fit.nnet,
+  mlp = fit.mlp,
   svmLinear = fit.svmLinear,
   svmRadial = fit.svmRadial,
   knn = fit.knn,
@@ -225,7 +220,6 @@ fits <- list(
   penalized = fit.penalized,
   mars = fit.earth, 
   cubist = fit.cubist,
-  # rrf = fit.rrf,
   ridge = fit.ridge,
   lasso = fit.lasso,
   bridge = fit.bridge,
@@ -276,7 +270,7 @@ data.frame(model = names(fits), size = sizes) %>%
   coord_flip() +
   scale_y_continuous(name = "model size (megabytes)")
 ```
-
+/// NO EDITING BEYOND THIS SPOT ///
 The spot-checking demonstrated that non-linear methods like model trees, random forests, gradient boosting machines, and neural networks tend to be the most accurate in this case. Regularized parametric models are not as accurate, but are notable because they tend to be smaller and faster at making predictions. Their accuracy might also be improved by building species-specific models, as the species information was encoded in dummy variables and much of it was removed before spot checking them.
 
 Of the non-linear models, the gradient boosting machine (gbm) looks to be the best compromise, offering high accuracies with relatively short prediction times in a smallish package. The single layer neural network that was checked (nnet) also represents a nice compromise, though it doesn't score quite as well as the gbm in any category.
