@@ -1,0 +1,546 @@
+---
+title: "DBH Increment Models for the Northern Forest"
+subtitle: "anlysis"
+author: "Neal Maker"
+output: html_notebook
+---
+
+```{r, setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = FALSE, warning = FALSE, message = FALSE)
+
+library("tidyverse")
+library("caret")
+library("recipes")
+library("gbm")
+library("gridExtra")
+library("iml")
+library("future")
+library("future.callr")
+library('cmocean')
+```
+
+Three different tree diameter increment models were built previously, using (1) a non-linear least squares approach based on Weiskittel et al (2016), (2) a machine learning approach that resulted in a gradient boosting machine, and (3) a mixed approach, which used the least squares model as a starting place and boosted it with a gradient boosting machine. Those models were built on a 'training' portion of a dataset drawn from Forest Inventory and Analysis (FIA) data from the US Northern Forest region. The three approaches are compared and analyzed here using an independent 'testing' portion of the dataset, which was set aside before model training. 
+
+```{r fetch, cache=TRUE}
+invisible({capture.output({
+  
+temp <- tempfile()
+download.file(
+  "https://github.com/nealmaker/tree-growth-nf/raw/master/data/nf-fia.rda", 
+  temp)
+load(temp)
+
+# remove trees that died and unwanted variables
+nf_fia <- nf_fia %>%
+  filter(status_change == "lived") %>%  
+  mutate(y = dbh_e - dbh_s,
+         ba_rate = (ba_e - ba_s) / interval,
+         bal_rate = (bal_e - bal_s) / interval) %>%
+  select(y, spp, dbh_s, cr_s, crown_class_s, tree_class_s,
+         forest_type_s, stocking_s, landscape, ba_s, bal_s, ba_rate, bal_rate,
+         site_class, slope, aspect, lat, lon, elev, ba_ash:bal_yellow.birch,
+         interval, plot) %>%
+  rename(dbh = dbh_s, cr = cr_s, crown_class = crown_class_s, ba = ba_s, bal = bal_s,
+         tree_class = tree_class_s, forest_type = forest_type_s, stocking = stocking_s)
+})})
+```
+
+```{r split, cache=TRUE}
+# test set is 20% of full dataset
+test_size <- .2
+
+# define test set based on plots (to make it truely independent)
+set.seed(10)
+test_plots <- sample(unique(nf_fia$plot),
+                     size = round(test_size * length(unique(nf_fia$plot))),
+                     replace = FALSE)
+
+index <- which(nf_fia$plot %in% test_plots)
+
+# remove plots, which are no longer needed
+nf_fia <- select(nf_fia, -plot)
+
+train <- nf_fia[-index, ]
+test <- nf_fia[index, ]
+```
+
+# Comparison
+
+All three models predict annual diameter at breast height growth rates, but for comparison, they were used iteratively across the whole remeasurement interval of each sample tree to predict the actual, whole interval DBH growth. This process is described in the "nls-model" notebook where the least squares model was built. It allows for a fair comparison between predictions and measured changes in DBH. 
+
+```{r loadMods}
+mod_nls <- readRDS("dbh-growth-model-nls.rds")
+mod_gbm <- readRDS("dbh-growth-model-gbm.rds")
+mod_boosted <- readRDS("dbh-growth-model-boosted.rds")
+
+dbh_growth_coefs <- mod_nls[[1]]
+```
+
+```{r predFunctions}
+# make standardized functions to predict annual growth from each model
+# and save them in a list
+predict_annual <- vector(mode = "list", length = 3)
+models <- c("nls", "gbm", "boosted")
+
+predict_annual[[1]] <- mod_nls[[2]]
+predict_annual[[2]] <- function(df) predict(mod_gbm, newdata = df)
+predict_annual[[3]] <- function(df) {
+  predict_annual[[1]](df) + predict(mod_boosted[[3]], newdata = df)
+}
+```
+
+```{r intIt}
+# predicts whole-interval DBH growth
+predict_delta <- function(df, mod) {
+  df$id <- 1:nrow(df)
+  
+  # iterate over unique interval lengths
+  out <- lapply(unique(df$interval), function(p) {
+    dfp <- df[df$interval == p, ]
+    dbh_s <- dfp$dbh
+    
+    # iterate over whole years in plot's interval
+    for(i in 1:floor(dfp$interval[1])) {
+      # increment dbh
+      dfp$dbh <- dfp$dbh + mod(dfp)
+      
+      # update ba & bal
+      dfp$ba <- dfp$ba + dfp$ba_rate
+      dfp$bal <- dfp$bal + dfp$bal_rate
+    }
+    
+    # add partial year's growth
+    if(dfp$interval[1] %% 1 > 0) {
+      dfp$dbh <- dfp$dbh + (mod(dfp) * 
+                              (dfp$interval[1] - floor(dfp$interval[1])))
+    }
+    
+    return(data.frame(id = dfp$id, dbh_inc = dfp$dbh - dbh_s))
+  })
+  
+  out <- do.call(rbind, out)
+  df <- left_join(df, out, by = "id")
+  return(df$dbh_inc)
+}
+```
+
+Overall accuracies (RMSE, normalized RMSE, and MAE), prediction times (seconds to make 1000 predictions), and model sizes (MB) of the three models are shown in the table below.
+
+```{r predict}
+# make predictions on test data
+test$yhat_nls <- predict_delta(test, predict_annual[[1]])
+test$yhat_gbm <- predict_delta(test, predict_annual[[2]])
+test$yhat_boosted <- predict_delta(test, predict_annual[[3]])
+
+# accuracy results
+general_results <- data.frame(model = models, rmse = NA, nrmse = NA, mae = NA)
+general_results$rmse[1] <- RMSE(test$y, test$yhat_nls)
+general_results$rmse[2] <- RMSE(test$y, test$yhat_gbm)
+general_results$rmse[3] <- RMSE(test$y, test$yhat_boosted)
+general_results$nrmse <- general_results$rmse / mean(test$y)
+general_results$mae[1] <- MAE(test$y, test$yhat_nls)
+general_results$mae[2] <- MAE(test$y, test$yhat_gbm)
+general_results$mae[3] <- MAE(test$y, test$yhat_boosted)
+
+# prediction times
+general_results$seconds <- sapply(1:3, function(i) {
+  system.time(predict_delta(test, predict_annual[[i]]))[[3]] * 1000 / nrow(test)
+})
+
+# sizes
+general_results$mb <- NA
+general_results$mb[1] <- lobstr::obj_size(mod_nls) / 1000000
+general_results$mb[2] <- lobstr::obj_size(mod_gbm) / 1000000
+general_results$mb[3] <- lobstr::obj_size(mod_boosted) / 1000000
+
+print(general_results)
+```
+
+When assessed on the training data using cross validation (described in earlier notebooks), the boosted model showed a modest decrease in RMSE over the gradient boosting machine. Here, assessed on independent data, it shows a modest increase. The differences are minor, and this could be due to random variation in the data, or it could be that the boosted model overfit the training data a bit. Either way, the boosted model doesn't appear to offer any advantage over the gradient boosting machine, especially since it is slower and larger.
+
+The gradient boosting machine does exhibit a marked improvement in accuracy over the least squares model, reducing the RMSE by `r round((general_results[1,2] - general_results[2,2]) / general_results[1,2] * 100, 1)`% and the MAE by `r round((general_results[1,4] - general_results[2,4]) / general_results[1,4] * 100, 1)`%. The improvement clearly comes at the cost of speed and size though, with the gradient boosting machine taking `r round(general_results[2,5] / general_results[1,5])` times as long to make predictions and using `r round(general_results[2,6] / general_results[1,6])` times the RAM.
+
+The gradient boosting machine and the least squares model both tend to overestimate the growth of slow growing trees and underestimate the growth of fast growing trees, but the gradient boosting machine is less biased in this respect. The following plot shows the trends between observed growth and prediction errors using generalized additive models. Its x axis is constrained to exclude trees with unusually high or low measured diameter growth rates, and shaded regions around trend lines depict 95% confidence intervals. 
+
+```{r yErrPlot}
+rbind(data.frame(model = "least squares", y = test$y, error = test$yhat_nls - test$y),
+      data.frame(model = "gbm", y = test$y, error = test$yhat_gbm - test$y)) %>% 
+  ggplot(aes(y, error, linetype = model)) +
+  geom_hline(yintercept = 0, col = "white", size = 1) +
+  geom_smooth(col = "black") + 
+  scale_x_continuous(limits = c(0,1)) + 
+  scale_y_continuous(name = expression(hat(y) - y))
+```
+This provides evidence that the gradient boosting machine does a better job predicting growth in uncommon situations. Further evidence is found through the examination of trends between various features and prediction errors, as in the following plots. In all cases, the least squares model is more biased than the gradient boosting machine when features' values move further from the mean, which is depicted with a vertical bar. For a sense of scale, note that measured DBH growth averaged `r round(mean(test$y), 2)` inches, so an error of 0.1 inches is `r round(.1 / mean(test$y)*100)`% of the mean.
+
+```{r FeatureErrPlots}
+p1 <- rbind(data.frame(model = "least squares", dbh = test$dbh, error = test$yhat_nls - test$y),
+            data.frame(model = "gbm", dbh = test$dbh, error = test$yhat_gbm - test$y)) %>% 
+  ggplot(aes(dbh, error, linetype = model)) +
+  geom_hline(yintercept = 0, col = "white", size = 1) +
+  geom_vline(xintercept = mean(test$dbh), col = "grey", size = 2) +
+  geom_smooth(col = "black") +  
+  scale_y_continuous(name = expression(hat(y) - y)) +
+  theme(legend.position="bottom")
+
+p2 <- rbind(data.frame(model = "least squares", cr = test$cr, error = test$yhat_nls - test$y),
+            data.frame(model = "gbm", cr = test$cr, error = test$yhat_gbm - test$y)) %>% 
+  ggplot(aes(cr, error, linetype = model)) +
+  geom_hline(yintercept = 0, col = "white", size = 1) +
+  geom_vline(xintercept = mean(test$cr), col = "grey", size = 2) +
+  geom_smooth(col = "black") +  
+  scale_y_continuous(name = expression(hat(y) - y)) +
+  theme(legend.position="none")
+
+p3 <- rbind(data.frame(model = "least squares", ba = test$ba, error = test$yhat_nls - test$y),
+            data.frame(model = "gbm", ba = test$ba, error = test$yhat_gbm - test$y)) %>% 
+  ggplot(aes(ba, error, linetype = model)) +
+  geom_hline(yintercept = 0, col = "white", size = 1) +
+  geom_vline(xintercept = mean(test$ba), col = "grey", size = 2) +
+  geom_smooth(col = "black") +  
+  scale_y_continuous(name = expression(hat(y) - y)) +
+  theme(legend.position="none")
+
+p4 <- rbind(data.frame(model = "least squares", bal = test$bal, error = test$yhat_nls - test$y),
+            data.frame(model = "gbm", bal = test$bal, error = test$yhat_gbm - test$y)) %>% 
+  ggplot(aes(bal, error, linetype = model)) +
+  geom_hline(yintercept = 0, col = "white", size = 1) +
+  geom_vline(xintercept = mean(test$bal), col = "grey", size = 2) +
+  geom_smooth(col = "black") +  
+  scale_y_continuous(name = expression(hat(y) - y)) +
+  theme(legend.position="none")
+
+#extract legend
+#https://github.com/hadley/ggplot2/wiki/Share-a-legend-between-two-ggplot2-graphs
+g_legend<-function(a.gplot){
+  tmp <- ggplot_gtable(ggplot_build(a.gplot))
+  leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+  legend <- tmp$grobs[[leg]]
+  return(legend)}
+
+mylegend<-g_legend(p1)
+
+grid.arrange(arrangeGrob(p1 + theme(legend.position="none"), p2, p3, p4, nrow = 2),
+             mylegend, nrow = 2, heights = c(10, 1))
+```
+
+# Interpretation of Machine Learning Model
+
+To interpret the machine learning model (gradient boosting machine), a number of different techniques were used in concert, with a focus on global interpretation to explain the overall structure of the model (as opposed to local interpretation that interprets individual predictions). Feature importance was calculated using permutation, to understand which predictors are most important to the model, and interactions between the predictors were explored using Friedman's H-statistic. Then the important simple effects and interactive effects were visualized using accumulated local effects plots, partial dependence plots, and individual conditional expectations plots. In this section, annualized predictions were used instead of whole-interval predictions to speed the analysis.
+
+```{r interpSetup}
+# SET UP STANDARDIZED OBJECT TO ALLOW EFFICIENT INTERPRETATIONS
+# df of features
+features <- select(test, -y, -ba, -bal, -ba_rate, -bal_rate, -interval, 
+                   -yhat_nls, -yhat_boosted, -yhat_gbm)
+
+# vector of actual responses
+response <- test$y / test$interval
+
+# object for use with iml
+components_iml <- Predictor$new(
+  model = mod_gbm,
+  data = features,
+  y = response,
+  predict.fun = predict
+)
+```
+
+```{r featureImp}
+# Create a PSOCK cluster
+future::plan("future::multisession", workers = 10)
+  
+# feature importance with H-statistic
+fimp <- iml::FeatureImp$new(components_iml, loss = "rmse", compare = "difference")
+```
+
+The independent test data was used to compute feature importance, which means that it measures features' actual importance in making new predictions, rather than their importance to the building of the model. Importance values are plotted below. On the left is the entire set of features, including individual species-specific basal areas and overtopping basal areas. On the right is the same plot, but with species-specific basal areas and overtopping basal areas consolidated, so that their combined importance can be seen. Scores reflect features' contribution to loss, and account for main effects and interactions. More important features have higher scores, and a score of 0 means that the feature contributes nothing to the predictions.
+
+```{r impPlots}
+fimp_combo <- fimp$clone(deep = T)
+
+bafimp <- filter(fimp$results, str_detect(feature, "ba_"))
+balfimp <- filter(fimp$results, str_detect(feature, "bal_"))
+fimp_combo$results <- 
+  rbind(filter(fimp$results, 
+               !str_detect(feature, "ba_"), 
+               !str_detect(feature, "bal_")),
+        data.frame(feature = "spp_spec_ba", 
+                   importance.05 = sum(bafimp$importance.05),
+                   importance = sum(bafimp$importance),
+                   importance.95 = sum(bafimp$importance.95),
+                   permutation.error = sum(bafimp$permutation.error)),
+        data.frame(feature = "spp_spec_bal", 
+                   importance.05 = sum(balfimp$importance.05),
+                   importance = sum(balfimp$importance),
+                   importance.95 = sum(balfimp$importance.95),
+                   permutation.error = sum(balfimp$permutation.error))
+        )
+
+pimp1 <- plot(fimp)
+pimp2 <- plot(fimp_combo)
+
+grid.arrange(pimp1, pimp2, nrow = 1)
+```
+Not only are the combined species-specific basal areas and overtopping basal areas very important, some of the individual species-specific competition metrics are important on their own.
+
+```{r interactions}
+# gbm::interact.gbm function is faster, but model specific. 
+# iml notoriously slow, but might be worth it for compatability
+# iml version VERY memory limited. Limit # workers.
+future::plan("future::sequential") # probably unnecessary; explicitly closes old workers
+future::plan("future::multisession", workers = 2)
+
+interactions <- Interaction$new(components_iml)
+```
+Overall interaction strengths for each feature are plotted below. Interaction strength (H-statistic) is the proportion of variance that is explained through interaction effects. A score of 0 means that interactions don't contribute to a feature's influence at all, and a score of 1 means that a feature's influence is due entirely to interactions.
+
+```{r intPlotMain}
+plot(interactions)
+```
+
+There is no strict cutoff above which interactions are considered important, but it is clear in this case that interactions do contribute meaningfully to the model, as four of the five most important features (crown ratio, dbh, species, and bal of soft maple) owe 1/4 to 1/3 of their influence to interactions.
+
+In addition to calculating overall interaction strengths for each feature, the H-statistic can be used to calculate the interaction strengths between individual features. Here it is used to examine crown ratio and soft maple overtopping basal area in more depth, to see what other features they are interacting with.
+
+```{r crInteractions}
+# NEW iml OBJECT WITH SAMPLING TO REDUCE COMP TIME
+# INTERACTIONS WERE CALCULATED MULTIPLE TIMES WITH DIFFERENT 
+# SAMPLE SIZES TO ENSURE STABLE H-STATISTICS.
+
+# sample of training data
+set.seed(123)
+iml_index <- sample(1:nrow(train), 50000, replace = F)
+# df of features
+features2 <- select(train[iml_index,], -y, -ba, -bal, -ba_rate, -bal_rate, -interval)
+
+# vector of actual responses
+response2 <- train[iml_index,]$y / train[iml_index,]$interval
+
+# object for use with iml
+sample_iml <- Predictor$new(
+  model = mod_gbm,
+  data = features2,
+  y = response2,
+  predict.fun = predict
+)
+
+future::plan("future::sequential") # probably unnecessary; explicitly closes old workers
+future::plan("future::multisession", workers = 2)
+
+# CALCULATE H-STAT W/ SAMPLE & REDUCED GRID (default is 30)
+cr_interaction <- Interaction$new(sample_iml, feature = "cr", grid.size = 20)
+plot(cr_interaction)
+```
+
+```{r balSMInteractions}
+bal_soft.maple_interaction <- 
+  Interaction$new(sample_iml, feature = "bal_soft.maple", grid.size = 20)
+
+sm_cortest <- cor.test(features2$bal_soft.maple, features2$ba_soft.maple, method = "pearson")
+
+
+plot(bal_soft.maple_interaction)
+```
+
+In the case of crown ratio, it looks like the model captures several meaningful interactions, most notably with dbh and latitude. Soft maple overtopping basal area, on the other hand, only interacts with soft maple basal area. This could be a legitimate interaction that is occurring between basal area and overtopping basal area within some or all species, but it could also be a false result that stems from a correlation between soft maple basal area and overtopping basal area. The pearson correlation coefficient (PCC) between those two variables is `r round(sm_cortest$estimate, 2)` (p = `r sm_cortest$p.value`), which indicates a strong correlation, so we should be very suspect of the interaction. 
+
+To dig deeper, we could calculate interaction strengths for more features and tease out any more complex interactions. For example, crown ratio seems to interact with both latitude and longitude, and it seems reasonable to expect a three way interaction between those variables (i.e., the effect of crown ratio could vary geographically). Interaction between latitude and longitude would support that hypothesis. Unfortunately calculating interaction strengths is very slow, and instead of exploring all the possibilities, I will focus on visualizing some of the model effects we have already uncovered.
+
+Meaningful interactions can be visualized using two way partial dependence plots (pdp), which show the combined simple effects and interaction of two features and are generally more intuitive; or with accumulated local effects (ale) plots, which only show the interaction without the simple effects and are less intuitive, but which account for correlations and are more robust.
+
+Here is a two way pdp for our most important interaction, between crown ratio and dbh. They are poorly correlated (PCC = `r round(cor(features2$cr, features2$dbh, method = "pearson"), 2)`), so the pdp is a reasonable choice.
+
+```{r pdpCrDbh}
+future::plan("future::multisession", workers = 10)
+
+pdp_cr_dbh <- 
+  FeatureEffect$new(sample_iml, feature = c("cr", "dbh"), method = "pdp")
+```
+
+```{r plotPdpCrDbh}
+pdp_cr_dbh$results %>% ggplot(aes(cr, dbh, fill = .value)) + 
+  scale_fill_viridis_c(option = "magma", name = "dbh \ngrowth") + 
+  geom_raster()
+```
+
+Here's another look at the same data, using a wireframe.
+
+```{r plotPdpCrDbhWire}
+wireframe(.value ~ cr*dbh, data = pdp_cr_dbh$results,
+          xlab = "cr", ylab = "dbh", zlab = "dbh growth",
+          main = "cr and dbh affect dbh growth",
+          drape = TRUE,
+          colorkey = TRUE,
+          screen = list(z = 60, x = -60)
+)
+```
+
+It looks like the effect of crown ratio is more pronounced at larger dbh and the effect of dbh is more pronounced with larger crown ratios.
+
+The most important predictors all seem to be influenced by interactions to some degree, so lets look at the simple effect of hard maple basal area, which is somewhat important and has only minimal interaction strength. A single feature ale plot will be robust (immune to correlations) and easy to interpret in this case.
+
+```{r aleBaHM}
+future::plan("future::multisession", workers = 10)
+
+ale_baHM <- 
+  FeatureEffect$new(sample_iml, feature = "ba_hard.maple", method = "ale")
+```
+
+```{r plotAleBaHM}
+ale_baHM$plot()
+```
+
+Now lets go back and figure out some of the more important interactions. Here are interaction strengths for dbh, species, latitude and longitude.
+
+```{r moreInteractions}
+future::plan("future::sequential") # probably unnecessary; explicitly closes old workers
+future::plan("future::multisession", workers = 2)
+
+dbh_interaction <- 
+  Interaction$new(sample_iml, feature = "dbh", grid.size = 20)
+spp_interaction <- 
+  Interaction$new(sample_iml, feature = "spp", grid.size = 20)
+lat_interaction <- 
+  Interaction$new(sample_iml, feature = "lat", grid.size = 20)
+lon_interaction <- 
+  Interaction$new(sample_iml, feature = "lon", grid.size = 20)
+```
+
+```{r plotMoreInteractions}
+plot(dbh_interaction)
+plot(spp_interaction)
+plot(lat_interaction)
+plot(lon_interaction)
+```
+
+Overtopping basal area of aspen could be interesting too, as it has the highest interaction strength of any predictor, despite being quite unimportant.
+
+```{r balAspInt}
+bal_aspen_interaction <- 
+  Interaction$new(sample_iml, feature = "bal_aspen", grid.size = 20)
+```
+
+```{r plotBalAspInt}
+plot(bal_aspen_interaction)
+```
+
+Examination of all these interaction strength suggests a number of specific interactions. Correlation coefficients can help show which could be due to correlation instead of legitimate interaction.
+
+```{r cors}
+data.frame(variables = c("lat:lon", "cr:dbh", "bal_hemlock:lon", "elev:lat", 
+                         "elev:lon", "bal_aspen:ba_aspen", "bal_aspen:ba_hard.maple",
+                         "bal_aspen:ba_beech"),
+           PCC = c(round(cor(features2$lat, features2$lon, method = "pearson"), 2),
+                   round(cor(features2$cr, features2$dbh, method = "pearson"), 2),
+                   round(cor(features2$bal_hemlock, features2$lon, method = "pearson"), 2),
+                   round(cor(features2$elev, features2$lat, method = "pearson"), 2),
+                   round(cor(features2$elev, features2$lon, method = "pearson"), 2),
+                   round(cor(features2$bal_aspen, features2$ba_aspen, method = "pearson"), 2),
+                   round(cor(features2$bal_aspen, features2$ba_hard.maple, method = "pearson"), 2),
+                   round(cor(features2$bal_aspen, features2$ba_beech, method = "pearson"), 2)))
+```
+
+Latitude and longitude display the highest interaction strength with each other, but they are also quite strongly correlated because the Northern Forest region generally runs southwest to northeast from the southern Adirondacks to northern Maine. There is also a moderate negative correlation between elevation and longitude, because the Adirondack plateau in the west is higher than the more coastal eastern part of the region. The only other correlation is between aspen basal area and aspen overtopping basal area, because trees in aspen heavy plots are more likely to be overtopped by aspens. The H-statistic can be influenced by these correlations and is not necessarily a good measures of interaction in these cases, but there could still be interactions. We will use correlation-independent ALE plots to visualize these potential interactions, and stick with the easier to interpret PDPs where correlations are not present.
+
+```{r pdpBaFirSpp}
+future::plan("future::multisession", workers = 10)
+
+pdp_ba_fir_spp <- 
+  FeatureEffect$new(sample_iml, feature = c("ba_fir", "spp"), method = "pdp")
+```
+Here is a pdp of fir basal area interacting with species. For clarity, only the ten most common species are shown.
+
+```{r plotPdpBaFirSpp}
+pdp_ba_fir_spp$results %>% 
+  filter(spp %in% c("fir", "spruce", "soft maple", "hard maple", "cedar",
+                    "beech", "yellow birch", "paper birch", "hemlock", 
+                    "white pine", "aspen", "ash")) %>% 
+  ggplot(aes(ba_fir, .value)) +
+  geom_line() +
+  facet_wrap(~ spp) +
+  scale_y_continuous(name = "dbh increment")
+```
+Some species (like yellow birch and paper birch) seem to grow slower with more fir in the neighborhood, while others (like spruce, hemlock and pine) are relatively unaffected by fir. Aspen actually looks to grow faster in the presence of fir. 
+
+```{r pdpBalHemlockLon}
+pdp_bal_hemlock_lon <- 
+  FeatureEffect$new(sample_iml, feature = c("bal_hemlock", "lon"), method = "pdp")
+```
+
+```{r plotPdpBalHemlockLon}
+wireframe(.value ~ lon*bal_hemlock, data = pdp_bal_hemlock_lon$results,
+          xlab = "longitude", ylab = "hemlock bal", zlab = "dbh growth",
+          main = "hemlock basal area and longitude affect dbh growth",
+          drape = TRUE,
+          colorkey = TRUE,
+          screen = list(z = 340, x = -60)
+)
+```
+
+Here we see that the effect of overtopping hemlock is more pronounced in the west, at lower longitude, and we see a generally positive correlation between overtopping hemlock and diameter growth.
+
+```{r pdpSppDbhCr}
+# use package 'pdp' b/c 'iml' won't take more than 2 predictors
+pdp_spp_dbh_cr <- 
+  pdp::partial(mod_gbm,  train = train[iml_index,], 
+               pred.var = c("spp", "dbh", "cr"), grid.resolution = 20)
+```
+
+```{r plotPdpSppDbhCr}
+pdp_spp_dbh_cr2 <- pdp_spp_dbh_cr
+class(pdp_spp_dbh_cr2) <- "data.frame"
+
+pdp_spp_dbh_cr2 %>% 
+  filter(spp %in% c("fir", "spruce", "soft maple", "hard maple", "cedar",
+                    "beech", "yellow birch", "paper birch", "hemlock", 
+                    "white pine", "aspen", "ash")) %>%
+  ggplot(aes(dbh, cr, fill = yhat)) +
+  geom_raster() +
+  facet_wrap(~ spp) +
+  scale_fill_cmocean(name = "speed")
+```
+
+```{r aleLatLon}
+ale_lat_lon <- 
+  FeatureEffect$new(sample_iml, feature = c("lat", "lon"), method = "ale")
+
+ale_lat <- 
+  FeatureEffect$new(sample_iml, feature = c("lat"), method = "ale")
+
+ale_lon <- 
+  FeatureEffect$new(sample_iml, feature = c("lon"), method = "ale")
+```
+
+Because latitude and longitude are correlated, we use ale to calculate their main and second order effects.
+
+```{r plotsAleLatLon}
+plat <- ale_lat$plot()
+plon <- ale_lon$plot()
+platlon <- ale_lat_lon$plot()
+
+grid.arrange(plat, plon, platlon, nrow = 1)
+```
+
+The ALE is a measure of deviance from the mean response; so by combining the mean response, main effects and second order effect additively we can visualize the full effects of these two variables, in a way that is analogous to a two-factor PDP. 
+
+```{r aleLatLonCombo}
+ale_latlon_c <- platlon$data %>% mutate(interaction = .ale) %>% 
+  select(lat, lon, interaction) %>% 
+  left_join(plat$data, by = "lat") %>% 
+  mutate(main_lat = .value) %>% 
+  select(-.value, -.type) %>% 
+  left_join(plon$data, by = "lon") %>% 
+  mutate(main_lon = .value) %>% 
+  select(-.value, -.type) %>% 
+  mutate(yhat = mean(test$y) + main_lat + main_lon + interaction)
+
+ale_latlon_c %>% filter(yhat < .52 & yhat > .48) %>% 
+  ggplot(aes(lon, lat, fill = yhat)) +
+  geom_raster(interpolate = T) + scale_fill_cmocean(name = "speed") +
+  geom_polygon(data = map_data("state"),
+               aes(x = long, y = lat, group = group),
+               fill = NA, col = "gray 25")+
+  coord_fixed(xlim = c(-76.8, -67), ylim = c(42.4, 47.5), ratio = 1.3)
+```
+Predictions outside the Northern Forest region are invalid, and some of them have been removed because they were either very high or very low, and were obscuring the relationships inside the region. Note that the range of mean growth rates is small and the geographic effect is quite subtle.

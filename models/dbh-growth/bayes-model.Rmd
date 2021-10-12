@@ -1,0 +1,373 @@
+---
+title: "DBH Increment Model for the Northern Forest"
+subtitle: "using a boosted least squares approach"
+author: "Neal Maker"
+output: html_notebook
+---
+
+```{r, setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = FALSE, warning = FALSE, message = FALSE)
+
+library("tidyverse")
+library("caret")
+library("recipes")
+```
+
+# Goals
+
+Create a diameter growth model that:   
+
+1. starts with a nonlinear least squares model and a limited set of features
+
+2. uses a machine learning approach to model the starting model's residuals, boosting it to incorporate information about additional features and more complex interactions
+
+# Data
+
+```{r fetch, cache=TRUE}
+invisible({capture.output({
+  
+temp <- tempfile()
+download.file(
+  "https://github.com/nealmaker/tree-growth-nf/raw/master/data/nf-fia.rda", 
+  temp)
+load(temp)
+
+# remove trees that died and unwanted variables
+nf_fia <- nf_fia %>%
+  filter(status_change == "lived") %>%
+  select(dbh_rate, spp, dbh_mid, cr_mid, crown_class_s, tree_class_s,
+         forest_type_s, stocking_s, landscape, ba_mid, bal_mid,
+         site_class, slope, aspect, lat, lon, elev, ba_ash:bal_yellow.birch,
+         interval, plot) %>%
+  rename(dbh = dbh_mid, cr = cr_mid, crown_class = crown_class_s, ba = ba_mid, bal = bal_mid,
+         tree_class = tree_class_s, forest_type = forest_type_s, stocking = stocking_s)
+})})
+```
+
+Forest Inventory and Analysis data were used from the US Northern Forest region. They consist of observations of `r nrow(nf_fia)` remeasured trees, located in `r length(unique(nf_fia[, ncol(nf_fia)]))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/tree-growth-nf).
+
+The data include `r ncol(nf_fia) - 2` potential predictors (features), which include individual tree attributes as well as plot-level attributes and site attributes. Three of the predictors are non-ordinal categorical variables, three are ordinal categorical variables, and the rest are numeric. Many of the numeric predictors are species-specific basal areas and species-specific overtopping basal areas. In aggregate, these fully describe basal area and overtopping basal area for each observation.  
+
+```{r split, cache=TRUE}
+# test set is 20% of full dataset
+test_size <- .2
+
+# define test set based on plots (to make it truely independent)
+set.seed(10)
+test_plots <- sample(unique(nf_fia$plot),
+                     size = round(test_size * length(unique(nf_fia$plot))),
+                     replace = FALSE)
+
+index <- which(nf_fia$plot %in% test_plots)
+
+# remove plots and intervals, which are no longer needed
+nf_fia <- select(nf_fia, -plot, -interval)
+
+train <- nf_fia[-index, ]
+test <- nf_fia[index, ]
+
+# sample from training data to expedite algorithm testing
+subsamp_size <- 10000
+set.seed(201)
+subsamp <- sample(1:nrow(train),
+                  size = subsamp_size,
+                  replace = FALSE)
+
+trainsub <- train[subsamp, ]
+```
+
+Data from `r 100 * test_size`% of all the sample plots was set aside for testing. Data were split based on plots to make sure that the testing data was truly independent. The data from the remaining `r 100 * (1 - test_size)`% of plots were used to explore different algorithms and to train the final model. These testing and training sets are the same that were used in training and testing nonlinear least squares and gradient boosting machine models previously, and as with those analyses, the training data was not used in this analysis so that the model created here can be compared to the others without data leakage. 
+
+Spot checking was used for preliminary comparison of potential boosting algorithms. It would have been very slow on all the training data, so a random sample of `r subsamp_size` observations was drawn from the training data and used instead.
+
+```{r prior}
+dbh_growth_model_nls <- readRDS("dbh-growth-model-nls.rds")
+
+predict.dbhgrowth <- dbh_growth_model_nls[[2]]
+dbh_growth_coefs <- dbh_growth_model_nls[[1]]
+
+train$resids <- train$dbh_rate - predict.dbhgrowth(train)
+train <- select(train, -dbh_rate)
+trainsub$resids <- trainsub$dbh_rate - predict.dbhgrowth(trainsub)
+trainsub <- select(trainsub, -dbh_rate)
+```
+
+# Least Squares Model
+
+A nonlinear least squares model was used as a starting place, which was based on Weiskittel et al. (2016). It was used to predict annual diameter growth on the training set, and the residual errors were calculated for each observation. The residuals were subsequently used as the response variable in the boosting models that will follow.
+
+# Boosting Model Spot-Checks
+
+As in the machine learning approach tried previously, a recipe was used for feature engineering in the boosting model. The same recipe was used as was used in the machine learning analysis, and it was only applied to the boosting algorithm, not to the initial least squares model. In addition, total basal area and total overtopping basal area were removed from the features prior to boosting, to prevent perfect colliniarities with species-specific basal areas and overtopping basal areas.
+
+```{r preprocess, cache=TRUE}
+train <- select(train, -ba, -bal)
+trainsub <- select(trainsub, -ba, -bal)
+
+dbh_recipe <- recipe(resids ~ ., data = train) %>% 
+  step_YeoJohnson("dbh", "cr", "crown_class", "tree_class", "stocking",
+                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
+  step_center("dbh", "cr", "crown_class", "tree_class", "stocking",
+                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
+  step_scale("dbh", "cr", "crown_class", "tree_class", "stocking",
+                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+```
+
+```{r test_options, cache=TRUE}
+# Repeated cross validation
+control <- trainControl(method="cv", number=10)
+seed <- 7
+metric <- "RMSE"
+```
+
+```{r spot_checks}
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  # generalized linear model
+  set.seed(seed)
+  fit.glmnet <- train(dbh_recipe, trainsub, method = 'glmnet', metric=metric,
+                      trControl=control)
+  # neural network (one layer)
+  set.seed(seed)
+  fit.nnet <- train(dbh_recipe, trainsub, method = 'nnet', metric=metric,
+                    trControl=control)
+  # neural network (multilayer perceptitron)
+  set.seed(seed)
+  fit.mlp <- train(dbh_recipe, trainsub, method = 'mlp', metric=metric,
+                   trControl=control)
+  # linear support vector machine
+  set.seed(seed)
+  fit.svmLinear <- train(dbh_recipe, trainsub, method = 'svmLinear', metric=metric,
+                         trControl=control)
+  # radial support vector machine
+  set.seed(seed)
+  fit.svmRadial <- train(dbh_recipe, trainsub, method = 'svmRadial', metric=metric,
+                         trControl=control)
+  # k-nearest neighbor
+  set.seed(seed)
+  fit.knn <- train(dbh_recipe, trainsub, method = 'knn', metric=metric,
+                   trControl=control)
+  # cart (trees)
+  set.seed(seed)
+  fit.cart <- train(dbh_recipe, trainsub, method = 'rpart', metric=metric,
+                    trControl=control)
+  # bagged trees
+  set.seed(seed)
+  fit.bagcart <- train(dbh_recipe, trainsub, method = 'treebag', metric=metric,
+                       trControl=control)
+  # random forest
+  set.seed(seed)
+  fit.rf <- train(dbh_recipe, trainsub, method = 'ranger', metric=metric,
+                  trControl=control)
+  # gradient boosting machine
+  set.seed(seed)
+  fit.gbm <- train(dbh_recipe, trainsub, method = 'gbm', metric=metric,
+                   trControl=control, verbose=FALSE)
+  # linear regression
+  set.seed(seed)
+  fit.lm <- train(dbh_recipe, trainsub, method = 'lm', metric=metric,
+                  trControl=control)
+  # penalized linear regression SLOW!
+  set.seed(seed)
+  fit.penalized <- train(dbh_recipe, trainsub, method = 'penalized', metric=metric,
+                         trControl=control)
+  # multivariate adaptive regression splines
+  set.seed(seed)
+  fit.earth <- train(dbh_recipe, trainsub, method = 'earth', metric=metric,
+                     trControl=control)
+  # cubist model tree SLOW!
+  set.seed(seed)
+  fit.cubist <- train(dbh_recipe, trainsub, method = 'cubist', metric=metric,
+                      trControl=control)
+  # ridge regression
+  set.seed(seed)
+  fit.ridge <- train(dbh_recipe, trainsub, method = 'ridge', metric=metric,
+                     trControl=control)
+  # quantile regression with LASSO penalty
+  set.seed(seed)
+  fit.lasso <- train(dbh_recipe, trainsub, method = 'rqlasso', metric=metric,
+                     trControl=control)
+  # bayesian ridge regression SLOW!
+  set.seed(seed)
+  fit.bridge <- train(dbh_recipe, trainsub, method = 'bridge', metric=metric,
+                      trControl=control, verb = 0)
+  # elastic net
+  set.seed(seed)
+  fit.enet <- train(dbh_recipe, trainsub, method = 'enet', metric=metric,
+                    trControl=control)
+  
+  stopCluster(cl)
+})})
+```
+
+```{r compileSpots, cache=TRUE}
+fits <- list(
+  glmnet = fit.glmnet,
+  nnet = fit.nnet,
+  mlp = fit.mlp,
+  svmLinear = fit.svmLinear,
+  svmRadial = fit.svmRadial,
+  knn = fit.knn,
+  cart = fit.cart,
+  bagcart = fit.bagcart,
+  rf = fit.rf,
+  gbm = fit.gbm,
+  lm = fit.lm,
+  penalized = fit.penalized,
+  mars = fit.earth,
+  cubist = fit.cubist,
+  ridge = fit.ridge,
+  lasso = fit.lasso,
+  bridge = fit.bridge,
+  enet = fit.enet
+  )
+
+results <- resamples(fits)
+sizes <- sapply(1:length(fits), function(i) {
+  lobstr::obj_size(fits[[i]]$finalModel)
+})
+predtimes <- lapply(1:length(fits), function(j) {
+  times <- sapply(1:30, function(k) {
+    system.time(predict(fits[[j]],
+                        newdata = train[sample(1:nrow(train), 1000,
+                                               replace = F), ]))[[3]]
+  })
+  return(data.frame(model = rep(names(fits)[[j]], 30),
+                    time = times))
+})
+predtimes <- do.call(rbind, predtimes)
+```
+
+Some `r length(fits)` different algorithms were compared using the training data subset to decide on the best methodology for the boosting model. Spot-checked models were trained using ten-fold cross validation and compared based on their cross validation root mean square errors, prediction speeds, and the amount of space they take up in memory. 
+
+``` {r spotResults, fig.cap="Accuracies of spot-checked algorithms, using three metrics. Accuracies were estimated using repeated cross validation.", cache=FALSE}
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+bwplot(results, scales = scales)
+```
+
+```{r spotPredtimes, fig.cap="Prediction times for spot-checked algorithms, based on 30 random samples of 1,000 trees each.", cache=FALSE}
+predtimes %>% 
+  mutate(model = fct_reorder(factor(model), time, median, .desc = T)) %>% 
+  ggplot(aes(model, time)) + 
+  geom_boxplot() + 
+  coord_flip() + 
+  scale_y_continuous(name = "seconds to make 1,000 predictions")
+```
+
+```{r spotSizes, fig.cap="Sizes of spot-checked model objects.", cache=FALSE}
+data.frame(model = names(fits), size = sizes) %>% 
+  mutate(size = size / 1000000,
+         model = fct_reorder(factor(model), size, .desc = T)) %>% 
+  ggplot(aes(model, size)) + 
+  geom_point(size = 2) + 
+  geom_segment( aes(x=model, xend=model, y=0, yend=size)) + 
+  coord_flip() +
+  scale_y_continuous(name = "model size (megabytes)")
+```
+
+## Final Boosting Model
+
+A gradient boosting machine (gbm) was chosen for the boosting model, because of its relatively high accuracy, fast prediction speed, and reasonably small size. It was trained following the process outlined by Boehmke and Greenwell in _Hands-On Machine Learning with R_ (2020, section 12.3.3). Unfortunately, the tuning depends on the size of the training data, so all of the training data had to be used, which makes the process very slow. Five-fold cross validation was used instead of 10-fold to decrease the training time.
+
+```{r gbmParam}
+# faster control procedure because this is comp heavy 
+control2 <- trainControl(method = "cv", number = 5)
+
+# First find best number of boosting iterations (trees) at high learning rate
+invisible({capture.output({
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.gbm1 <- train(dbh_recipe, train, method = 'gbm', metric=metric,
+                    trControl=control2, verbose=FALSE,
+                    tuneGrid = expand.grid(shrinkage = .5,
+                                           n.trees = seq(11000, 20000, by = 3000),
+                                           interaction.depth = 3, 
+                                           n.minobsinnode = 10)) 
+  
+  stopCluster(cl)
+})})
+
+plot(fit.gbm1)
+```
+```{r gbmTrees}
+# Then optimize tree-specific parameters 
+invisible({capture.output({
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.gbm2 <- train(dbh_recipe, train, method = 'gbm', metric=metric,
+                   trControl=control2, verbose=FALSE,
+                   tuneGrid = expand.grid(shrinkage = fit.gbm1$bestTune$shrinkage,
+                                          n.trees = fit.gbm1$bestTune$n.trees,
+                                          interaction.depth = c(1, 2, 3),
+                                          n.minobsinnode = c(15, 20)))
+  
+  stopCluster(cl)
+})})
+
+plot(fit.gbm2)
+```
+
+``` {r gbmFinal}
+# Refit without resampling, to get smaller train object
+invisible({capture.output({
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.gbm.boost <- 
+    train(dbh_recipe, train, method = 'gbm', metric=metric,
+          trControl = trainControl(method = "none"), verbose = FALSE,
+          tuneGrid = expand.grid(shrinkage = fit.gbm2$bestTune$shrinkage,
+                                 n.trees = fit.gbm2$bestTune$n.trees,
+                                 interaction.depth = 
+                                   fit.gbm2$bestTune$interaction.depth,
+                                 n.minobsinnode = 
+                                   fit.gbm2$bestTune$n.minobsinnode))
+  
+  stopCluster(cl)
+})})
+```
+
+# Final Model
+
+```{r final}
+# get ba and bal back
+train$ba <- nf_fia$ba[-index]
+train$bal <- nf_fia$bal[-index]
+
+# predicts dbh with final model
+predict.dbh.boost <- function(df) {
+  exp(dbh_growth_coefs[df$spp, "b30"] +
+      dbh_growth_coefs[df$spp, "b31"] * log(df$dbh) +
+      dbh_growth_coefs[df$spp, "b32"] * df$dbh +
+      dbh_growth_coefs[df$spp, "b33"] * df$bal +
+      dbh_growth_coefs[df$spp, "b34"] * sqrt(df$ba) +
+      dbh_growth_coefs[df$spp, "b35"] * df$site_class) +
+  predict(fit.gbm.boost, newdata = df)
+}
+
+gbmTimes <- 
+  sapply(1:30, function(k) {
+    system.time(predict.dbh.boost(train[sample(1:nrow(train), 1000,
+                                               replace = F), ]))[[3]]
+  })
+
+dbh_growth_model_boosted <- list(dbh_growth_coefs, predict.dbh.boost, fit.gbm.boost)
+```
+
+This final version of the gradient boosting machine achieves a cross-validation RMSE of `r round(min(fit.gbm2$results[,5]), 4)` inches. It uses `r round(lobstr::obj_size(fit.gbm.boost, dbh_growth_coefs)/1000000)` megabytes in memory, and takes an average of `r round(mean(gbmTimes), 2)` seconds to make one thousand predictions.
+
+``` {r save}
+saveRDS(dbh_growth_model_boosted, file = "dbh-growth-model-boosted.rds")
+```

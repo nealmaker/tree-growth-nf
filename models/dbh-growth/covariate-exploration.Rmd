@@ -1,0 +1,176 @@
+---
+title: "DBH Growth Model for the Northern Forest"
+subtitle: "Exploration of Covariates"
+author: "Neal Maker"
+output: html_notebook
+---
+
+```{r, setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = FALSE, warning = FALSE, message = FALSE)
+
+library("tidyverse")
+library("caret")
+library("recipes")
+```
+
+# Goals
+
+1. See if dbh-height ratio could replace cr, which might make long-term testing with existing datasets easier. (It could also be a better measure of past vigor or better proxy for age.)
+
+2. Check out some other more innovative covariates (such as Aaron suggested). These could include structural diversity metrics and species diversity metrics, which would pair well with recent research into multi-age and mult-species management. (Aaron mentioned climate factors, species functional traits like specific gravity and shade tolerance, species and structural diversity indexes, and more sophisticated measures of competition like SDI.)
+
+3. Explore importance of species specific ba and bal.
+
+  a. what is difference with and without them, all else equal?
+  
+  b. Do we lose anything by just using one of them (which would save calculations in Forest Maker)?
+  
+## New Covariates to Try
+
+Subplot or plot level covariates need to be calculated in "nf-dataset-creation.Rmd".
+
+- dbh-height ratio (calculated)
+
+- height (don't calculate ratio, but algo might find it on its own)
+  
+- better, custom competition index (subplot level; based on estimated crown volumes, estimated light interception, and difference in height from target tree)
+
+- spp diversity (subplot level or even plot level)
+
+  - richness (total # spp on plot; Menhinick’s Index; Margalefs index; or omit b/c Hill diversity accounts for richness already)
+  
+  - eveness (Gini-Simpson’s Index, Shannon-Wiener Index [makes some assumptions that we would break, Simpsons might be more statistically appropriate, but Shannon is mores sensitive to richness, which is important], or Hill diversity [apparently the best]; also should standardize sample based on coverage [see Roswell et al. 2021]
+  
+- structural diversity (subplot or plot level)
+
+  - coeficient of variation of heights (sd/mean, see Brassard et al., 2008), or use spp eveness index with size classes (Buongiorno et al., 1994; Dănescu et al., 2016; Magurran, 2004; Staudhammer and LeMay, 2001)
+  
+  - coeficient of variation of dbh (sd/mean, see Brassard et al., 2008), or use spp eveness index with size classes (Buongiorno et al., 1994; Dănescu et al., 2016; Magurran, 2004; Staudhammer and LeMay, 2001)
+  
+
+
+# Data
+
+```{r fetch, cache=TRUE}
+invisible({capture.output({
+
+temp <- tempfile()
+download.file(
+  "https://github.com/nealmaker/tree-growth-nf/raw/master/data/nf-fia.rda",
+  temp)
+load(temp)
+
+# NEED TO CALCULATE PLOT METRICS IN DATASET CREATION SCRIPT, AS nf_fia DOESN"T
+# NECCESARILY CONTAIN ALL TREES IN EACH PLOT !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+# remove trees that died and unwanted variables
+nf_fia <- nf_fia %>%
+  filter(status_change == "lived") %>%
+  select(dbh_rate, spp, dbh_mid, cr_mid, ht_mid, crown_class_s, tree_class_s,
+         forest_type_s, stocking_s, landscape,
+         site_class, slope, aspect, lat, lon, elev, ba_ash:bal_yellow.birch,
+         interval, plot) %>%
+  rename(dbh = dbh_mid, cr = cr_mid, crown_class = crown_class_s,
+         tree_class = tree_class_s, forest_type = forest_type_s, stocking = stocking_s)
+})})
+```
+
+Forest Inventory and Analysis data were used from the US Northern Forest region. They consist of observations of `r nrow(nf_fia)` remeasured trees, located in `r length(unique(nf_fia[, ncol(nf_fia)]))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/tree-growth-nf/blob/master/fia/nf-dataset-creation.pdf).
+
+Preliminary analysis using [nonlinear least squares models](https://github.com/nealmaker/tree-growth-nf/blob/master/models/dbh-growth/nls-model.Rmd) demonstrated the value of using the annualized diameter growth rate as a response variable, instead of using the change in diameter over the entire remeasurement period. For this reason, the annualized diameter at breast height ($DBH\_rate$) was used, and mid-period values were used for mutable individual tree attributes to better reflect the average conditions over the remeasurement period. These were calculated as the average of the starting and ending values.
+
+The data include `r ncol(nf_fia) - 2` potential predictors (features), which include individual tree attributes as well as plot-level attributes and site attributes. Three of the predictors are non-ordinal categorical variables, three are ordinal categorical variables, and the rest are numeric. Many of the numeric predictors are species-specific basal areas and species-specific overtopping basal areas. In aggregate, these fully describe basal area and overtopping basal area for each observation. Total basal area and overtopping basal area were therefore omitted from the covariates to prevent perfect collinearities. 
+
+```{r split, cache=TRUE}
+# test set is 20% of full dataset
+test_size <- .2
+
+# define test set based on plots (to make it truely independent)
+set.seed(10)
+test_plots <- sample(unique(nf_fia$plot),
+                     size = round(test_size * length(unique(nf_fia$plot))),
+                     replace = FALSE)
+
+index <- which(nf_fia$plot %in% test_plots)
+
+# remove plots and intervals, which are no longer needed
+nf_fia <- select(nf_fia, -plot, -interval)
+
+train <- nf_fia[-index, ]
+test <- nf_fia[index, ]
+
+# sample from training data to expedite algorithm testing
+subsamp_size <- 10000
+set.seed(201)
+subsamp <- sample(1:nrow(train),
+                  size = subsamp_size,
+                  replace = FALSE)
+
+trainsub <- train[subsamp, ]
+```
+
+Data from `r 100 * test_size`% of all the sample plots was set aside for testing. Data were split based on plots to make sure that the testing data was truly independent. The data from the remaining `r 100 * (1 - test_size)`% of plots were used to explore different algorithms and to train the final model. These testing and training sets are the same that were used in training and testing a nonlinear least squares model previously, and as with the nonlinear least squares model, the training data was not used in this analysis so that the model created here can be compared to others without data leakage. 
+
+Spot checking of numerous algorithms would have been very slow on all the training data, so a random sample of `r subsamp_size` observations was drawn from the training data and used instead.
+
+# Preprocessing
+
+Preprocessing was performed using recipes, to allow for easy reproducibility within cross validation without data leakage. Recipes allow preprocessing steps to be prescribed ahead of time, then easily applied to different data. For example, a recipe can call for centering a certain feature, but the centering is actually done fold by fold during cross validation, so that each fold is treated independently.
+
+A number of preprocessing steps were carried out on the covariates to ensure that data would be suitable for a wide range of modeling methods and to make for more accurate models. 
+
+Nominal categorical variables were re-coded using dummy encoding, to allow for their incorporation into various regression models. Dummy encoding was used instead of one-hot encoding to avoid collinearity. Several ordinal categorical variables are present in the data too, but they are already encoded with appropriate integers, so no preproceesing of them was needed.
+
+Numeric predictors were normalized using Yeo-Johnson transformation and were centered and scaled to put them in similar units. This can help improve the accuracy of many models, and can alleviate problems with parametric models that work better with normally distributed covariates. Yeo-Johnson transformation was chosen because some of the features contain negative values. 
+
+A test was done using Random forest algorithms to assess the effect of standardizing and normalizing dummy-encoded variables and the sparse, species-specific basal areas and overtopping basal areas.
+
+```{r testOptions, cache=TRUE}
+# Cross validation
+control <- trainControl(method = "cv", number = 10)
+seed <- 7
+metric <- "RMSE"
+```
+
+```{r preprocTest}
+# Recipes with and without standardizing dummies 
+dbh_recipe1 <- recipe(dbh_rate ~ ., data = train) %>% 
+  step_YeoJohnson("dbh", "cr", "crown_class", "tree_class", "stocking",
+                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
+  step_center("dbh", "cr", "crown_class", "tree_class", "stocking",
+                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
+  step_scale("dbh", "cr", "crown_class", "tree_class", "stocking",
+                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe2 <- recipe(dbh_rate ~ ., data = train) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+# Train both ways w/ RF
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.nodum <- train(dbh_recipe1, trainsub, method = 'ranger', 
+                     metric=metric, trControl=control)
+  set.seed(seed)
+  fit.dum <- train(dbh_recipe2, trainsub, method = 'ranger', 
+                   metric=metric, trControl=control)
+  
+  stopCluster(cl)
+})})
+
+# Compare
+results <- resamples(list(standardized = fit.dum, not = fit.nodum))
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+bwplot(results, scales = scales)

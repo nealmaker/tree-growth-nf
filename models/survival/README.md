@@ -5,6 +5,7 @@ Tree mortality model for the Northern Forest
 
 * More exploritory analysis, especially examination of possible interactive effects.
 * Better lit review
+* Stratify training and test sets by 'lived' so they reflect true population ratios.
 * Exploration of other model types
   * Are non-parametric models best?
   * Would disagregation models be useful & possible? (see Zhang et al. 2011)

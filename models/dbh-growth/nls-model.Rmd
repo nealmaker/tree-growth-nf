@@ -1,0 +1,428 @@
+---
+title: "DBH Growth Model for the Northern Forest"
+subtitle: "using nonlinear least squares"
+author: "Neal Maker"
+output: html_notebook
+---
+
+```{r, setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, error = FALSE, warning = FALSE, message = FALSE)
+
+library("tidyverse")
+library("rsample")
+library("caret")
+library("nlme")
+```
+
+## Goals
+
+Construct nonlinear DBH growth model similar to that of Weiskittel et al. 2016 
+
+- try treating plots as a random effect  
+
+- compare using annualized dbh growth rate and treating remeasurement interval as a covariate
+
+- find species-specific coefficients   
+
+## Data and Resampling
+
+```{r fetch, cache=TRUE}
+invisible({capture.output({
+  
+temp <- tempfile()
+download.file(
+  "https://github.com/nealmaker/tree-growth-nf/raw/master/data/nf-fia.rda", 
+  temp)
+load(temp)
+
+
+fia <- nf_fia %>%
+  filter(status_change == "lived") %>%  
+  mutate(delta_dbh = dbh_e - dbh_s) %>%
+  select(dbh_rate, delta_dbh, spp, dbh_s, dbh_mid, ba_s, ba_mid, bal_s, bal_mid, site_class, interval, plot) %>% 
+  rename(dbh = dbh_s, ba = ba_s, bal = bal_s)
+})})
+```
+
+Forest Inventory and Analysis data were used from the US Northern Forest region. They consist of observations of `r nrow(fia)` remeasured trees, located in `r length(unique(fia$plot))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/tree-growth-nf).
+
+Only five predictors were used for the annualized diameter rate model developed here, which are generally the same used by Weiskittel et al. (species, diameter at breast height, basal area, overtopping basal area, and site productivity). Weiskittel et al. used climate site index to describe site productivity, but site productivity class is used here, as reported by the FIA program. While climate site index is a proxy for site index, site productivity class is an ordinal categorical measure of the potential wood volume growth on a site. 
+
+The remeasurement interval was also treated as a covariate in several of the models developed here, in addition to the other five predictors.
+
+```{r split, cache=TRUE}
+# test set is 20% of full dataset
+test_size <- .2
+
+# define test set based on plots (to make it truely independent)
+set.seed(10)
+test_plots <- sample(unique(fia$plot), 
+                     size = round(test_size * length(unique(fia$plot))), 
+                     replace = FALSE)
+
+index <- which(fia$plot %in% test_plots)
+train <- fia[-index, ]
+test <- fia[index, ]
+```
+
+Data from `r 100 * test_size`% of all the sample plots was set aside for final model testing. Data were split based on plots to make sure that the testing data were truly independent. The data from the remaining `r 100 * (1 - test_size)`% of plots were used for model training. The testing data is not used in this analysis, so that the final, nonlinear least squares model created here can be compared to other diameter growth models without data leakage.
+
+Several different model forms were compared before fitting the final model, and 10-fold cross validation was used to estimate their accuracy. They were compared based on cross validation root mean square errors.
+
+``` {r cv}
+folds <- vfold_cv(train, v = 10)
+```
+
+## Using Random Effects
+
+To begin, species were ignored and two different models were compared to test the efficacy of treating plots as a random effect, which could potentially increase model accuracy by accounting for the correlation between trees within plots (Weiskittel et al. 2007). 
+
+The models were adapted from Weiskittel et al. (2016) and take the form $$DBH\_rate = exp(b_{30} + b_{31}*ln(DBH) + b_{32}*DBH + b_{33}*BAL + b_{34}*\sqrt{BA} + b_{35}*SC)$$ where $DBH\_rate$ is the mean annual DBH growth rate over the remeasurement period, in inches per year, $DBH$ is the diameter at breast height in inches, $BAL$ is the overtopping basal area in square feet per acre, $BA$ is the plot basal area in square feet per acre, and $SC$ is the site class. Mid-interval $DBH$, $BA$, and $BAL$ values were used to better reflect average conditions over the remeasurement period, and were calculated as the mean of the starting and ending values.
+
+```{r randomEffects}
+# makes predictions from fixed and random models
+predict.dbh.a <- function(df, coefs) {
+  exp(coefs["b30"] +
+      coefs["b31"] * log(df$dbh_mid) +
+      coefs["b32"] * df$dbh_mid +
+      coefs["b33"] * df$bal_mid +
+      coefs["b34"] * sqrt(df$ba_mid) +
+      coefs["b35"] * df$site_class)
+}
+
+# gets coefficients for nls model
+get_coefs_a_nls <- function(df, start) {
+  mod <- nls(dbh_rate ~ exp(b30 + b31*log(dbh_mid) + b32*dbh_mid + b33*bal_mid + 
+                              b34*sqrt(ba_mid) + b35*site_class),
+             start = start, data = df)
+  
+  coef(mod)
+}
+
+# gets coefficients for nlme model
+get_coefs_a_nlme <- function(df, start) {
+  summary(nlme(dbh_rate ~ exp(b30 + b31*log(dbh_mid) + b32*dbh_mid + b33*bal_mid +
+                              b34*sqrt(ba_mid) + b35*site_class), 
+               data = df,
+               fixed = b30 + b31 + b32 + b33 + b34 + b35 ~ 1, 
+               random = b34 + b35 ~ 1,
+               groups = ~ plot,
+               start = unlist(start)))$coefficients$fixed
+}
+
+# gets rmse for fold in annual cv w/ separate equations for each species
+rmse_a <- function(fold, start, type) {
+  # get training and testing dfs for fold
+  train <- analysis(fold)
+  test <- assessment(fold)
+  
+  if(type == "nls") {
+    get_coefs <- get_coefs_a_nls
+  } else if(type == "nlme") {
+    get_coefs <- get_coefs_a_nlme
+    start = unlist(start)
+  } else (stop("unsupported model type"))
+  
+  # fit model for fold
+  coefs <- get_coefs(train, start)
+  # get predictions
+  yhat <- predict.dbh.a(test, coefs)
+  # calc RMSE
+  return(caret::RMSE(yhat, test$dbh_rate))
+}
+
+# initialize coefficients using Weiskittel nomenclature & values from a model
+# we made that didn't differentiate species.
+start <- list(b30 = -2,
+              b31 = .9,
+              b32 = -.1,
+              b33 = -.005,
+              b34 = -.03,
+              b35 = .02)
+
+# df of rmses from fixed and mixed cv
+first_results <- data.frame(type = "no random effects",
+                            rmse = map_dbl(folds$splits, rmse_a, start, type = "nls"))
+
+first_results <- first_results %>% 
+  rbind(data.frame(type = "random effects",
+                   rmse = map_dbl(folds$splits, rmse_a, start, type = "nlme")))
+
+# print boxplots
+first_results %>% ggplot(aes(rmse, type)) +
+  geom_boxplot() + geom_point(alpha = .4, size = 3) +
+  labs(title = "Distributions of Cross Validation RMSEs",
+       subtitle = "for annualized models ignoring species") +
+  theme(axis.title.y = element_blank())
+```
+
+The model with random effects did not improve accuracy over the fixed effects model, so random effects were discarded and the analysis continued using fixed effects only.
+
+## Comparing Annualized DBH Rates and Whole Interval DBH Change
+
+Three more models were constructed to compare the use of two annualized DBH rates ($DBH\_rate$) and whole interval DHB growth ($\Delta DBH$) response variables. The whole interval growth was simply calculated as the difference between DBH at the beginning and end of the remeasurement interval, $\Delta DBH = DBH_{t+i} - DBH_t$ where $t$ is the starting year and $i$ is the remeasurement interval in years. One of the annualized rates used linear interpolation, which Mcdill and Amateis (1993) referred to as the "averaging method" and which was calculated as the average annual increment over the interval, $DBH\_rate = (DBH_{t+i} - DBH_t)/i$. The second annualized rate was calculated using McDill and Amateis' (1993) "two-step," or nonlinear interpolation, in which the growth over the remeasurement period is assumed to follow the same form as the annualized growth model. The model is fit iteratively, by estimating the proportion of growth that occurred in the first year ($z$), training a model based on that assumption, then updating $z$ and refitting the model; until $z$ stops changing appreciably. 
+
+With both the linear and nonlinear annualized rates, the same model form was used that was described previously. When using whole interval change, the form was adjusted to include the remeasurement interval as a predictor, such that $$\Delta DBH = exp(b_{30} + b_{31}*ln(DBH) + b_{32}*DBH + b_{33}*BAL + b_{34}*\sqrt{BA} + b_{35}*SC + b_{36}*ln(I))$$ where $I$ is the remeasurement interval in years and all other terms have been defined previously. Species were also brought into these models, by splitting the data and fitting species-specific coefficients.
+
+As with the random effects assessment described above, the three new models were compared using cross validation. To make a valid comparison, the annualized DBH rate models were applied iteratively to each observation to convert their predictions to whole-interval predictions. The change in DBH was predicted for one year at a time, then the basal area and overtopping basal area were updated before predicting the next year's diameter growth. This process was repeated for each year of the remeasurement interval. Because intervals are real numbers, not integers, the growth in the final iteration was reduced to account for partial years. For example, if the remeasurement period was 5.2 years, the iterative growth prediction was carried out 6 times, and the annual growth predicted in the sixth iteration was multiplied by 0.2 before adding it to the total DBH change.
+
+```{r linearInterp}
+# DIAMETER INCREMENT WITH LINEAR INTERPOLATION
+# train w/ averaging method that assumes linear growth through remeasurement ---
+get_coefs_a <- get_coefs_a_nls
+
+predict.dbh.a <- function(df, coefs) {
+  exp(coefs[df$spp, "b30"] +
+      coefs[df$spp, "b31"] * log(df$dbh) +
+      coefs[df$spp, "b32"] * df$dbh +
+      coefs[df$spp, "b33"] * df$bal +
+      coefs[df$spp, "b34"] * sqrt(df$ba) +
+      coefs[df$spp, "b35"] * df$site_class)
+}
+
+# # calculates bal for a plot
+# bal <- function(dbh, ba){
+#   sapply(dbh, function(x){
+#     index <- dbh > x
+#     return(sum(ba[index]))
+#   })
+# }
+
+# gets rmse for fold in annualized cv
+rmse_a <- function(fold, start) {
+  # get training and testing dfs for fold
+  train <- analysis(fold)
+  test <- assessment(fold)
+  
+  # split train into species-specific data frames
+  by_spp <- split(train, train$spp)
+  
+  # fit model for fold
+  coefs_list <- by_spp %>% map(get_coefs_a, start)
+  coefs <- as.data.frame(do.call(rbind, coefs_list))
+  # get predictions
+  yhat <- predict.int.a(test, coefs)
+  # calc RMSE
+  caret::RMSE(yhat, test$delta_dbh)
+}
+
+# converts annualized predictions to interval predictions
+predict.int.a <- function(df, coefs) {
+  df$id <- 1:nrow(df)
+  
+  # iterate over unique interval lengths
+  out <- lapply(unique(df$interval), function(p) {
+    dfp <- df[df$interval == p, ]
+    
+    # assume linear change in ba & bal and get rates of change
+    dfp$ba_rate <- (dfp$ba_mid - dfp$ba) / dfp$interval / 2
+    dfp$bal_rate <- (dfp$bal_mid - dfp$bal) / dfp$interval / 2
+    dbh_s <- dfp$dbh
+    
+    # iterate over whole years in plot's interval
+    for(i in 1:floor(dfp$interval[1])) {
+      # increment dbh
+      dfp$dbh <- dfp$dbh + predict.dbh.a(dfp, coefs)
+      
+      # update ba & bal
+      dfp$ba <- dfp$ba + dfp$ba_rate
+      dfp$bal <- dfp$bal + dfp$bal_rate
+    }
+    
+    # add partial year's growth
+    if(dfp$interval[1] %% 1 > 0) {
+      dfp$dbh <- dfp$dbh + (predict.dbh.a(dfp, coefs) * 
+                              (dfp$interval[1] - floor(dfp$interval[1])))
+    }
+    
+    return(data.frame(id = dfp$id, dbh_inc = dfp$dbh - dbh_s))
+  })
+  
+  out <- do.call(rbind, out)
+  df <- left_join(df, out, by = "id")
+  return(df$dbh_inc)
+}
+
+# calculate RMSEs for folds and save results
+ia_results <- 
+  data.frame(type = "linear interpolation",
+             rmse = map_dbl(folds$splits, rmse_a, start))
+```
+
+```{r nonlinearInterp}
+# DIAMETER INCREMENT WITH NONLINEAR INTERPOLATION
+# train with two-step interpolation as described by McDill & Amateis (1993)
+
+# trains model using estimated first year's growth
+get_mod <- function(df, start) {
+  nls(dbh_hat ~ exp(b30 + b31*log(dbh) + b32*dbh + b33*bal + 
+                    b34*sqrt(ba) + b35*site_class),
+      start = start, data = df, 
+      control = list(warnOnly = T, minFactor = 1 / 2048))
+}
+
+# gets coefficients of interpolated model (rewrites existing function)
+get_coefs_a <- function(df, start) {
+  # start by assuming linear growth; z is proportion of growth in year 1
+  df$z <- 1/df$interval
+  df$z2 <- 1
+  df$id <- 1:nrow(df)
+  df$dbh_first <- NA
+  i <- 0
+  
+  # repeat until z changes very little
+  while(sum(abs(df$z - df$z2)) > .001) {
+    # fit model with most recent z -------------------------------
+    df$dbh_hat <- df$delta_dbh * df$z
+    mod <- get_mod(df, start)
+    
+    # use model to recalculate z ---------------------------------
+    df$dbh_first <- predict(mod, newdata = df)
+    
+    # iterate over unique intervals
+    out <- lapply(unique(df$interval), function(p) {
+      dfp <- df[df$interval == p, ]
+      
+      # assume linear change in ba & bal and get rates of change
+      dfp$ba_rate <- (dfp$ba_mid - dfp$ba) / dfp$interval / 2
+      dfp$bal_rate <- (dfp$bal_mid - dfp$bal) / dfp$interval / 2
+      dbh_s <- dfp$dbh
+      
+      # grow first year
+      dfp$dbh <- dfp$dbh + dfp$dbh_first
+      
+      # iterate over whole years in plot's interval (excluding first)
+      for(i in 1:(floor(dfp$interval[1]) - 1)) {
+        # increment dbh
+        dfp$dbh <- dfp$dbh + predict(mod, newdata = dfp)
+        
+        # update ba & bal
+        dfp$ba <- dfp$ba + dfp$ba_rate
+        dfp$bal <- dfp$bal + dfp$bal_rate
+      }
+      
+      # add partial year's growth
+      if(dfp$interval[1] %% 1 > 0) {
+        dfp$dbh <- dfp$dbh + (predict(mod, newdata = dfp) * 
+                                (dfp$interval[1] - floor(dfp$interval[1])))
+      }
+      
+      return(data.frame(id = dfp$id, z = dfp$dbh_first / (dfp$dbh - dbh_s)))
+    })
+  
+    out <- do.call(rbind, out)
+    df$z2 <- df$z
+    df$z <- left_join(select(df, id), out, by = "id")$z
+    # print(paste0("i = ", i, ". z from ", mean(df$z2), " to ", mean(df$z), ". ", 
+    #              sum(abs(df$z - df$z2)), " change."))
+    i <- i + 1
+  }
+  return(coef(mod))
+}
+
+# calculate RMSEs for folds and save results
+ia_results <- 
+  rbind(ia_results, 
+        data.frame(type = "nonlinear interpolation",
+                   rmse = map_dbl(folds$splits, rmse_a, start)))
+```
+
+```{r wholeInterval}
+# DIAMETER GROWTH WITH REMEASUREMENT INTERVAL AS COVARIATE
+
+# starting values for interval response
+start_i <- list(b30 = -2,
+              b31 = .9,
+              b32 = -.1,
+              b33 = -.005,
+              b34 = -.03,
+              b35 = .02,
+              b36 = .1)
+
+# gets coefficients for models with whole-interval response
+get_coefs_i <- function(df, start) {
+  mod <- nls(delta_dbh ~ exp(b30 + b31*log(dbh) + b32*dbh + b33*bal + 
+                             b34*sqrt(ba) + b35*site_class + b36*log(interval)),
+             start = start, data = df)
+  
+  coef(mod)
+}
+
+
+# predicts from coefs
+predict.dbh.i <- function(df, coefs) {
+  exp(coefs[df$spp, "b30"] +
+      coefs[df$spp, "b31"] * log(df$dbh) +
+      coefs[df$spp, "b32"] * df$dbh +
+      coefs[df$spp, "b33"] * df$bal +
+      coefs[df$spp, "b34"] * sqrt(df$ba) +
+      coefs[df$spp, "b35"] * df$site_class +
+      coefs[df$spp, "b36"] * log(df$interval))
+}
+
+# gets rmse for fold in interval cv
+rmse_i <- function(fold, start) {
+  # get training and testing dfs for fold
+  train <- analysis(fold)
+  test <- assessment(fold)
+  
+  # split train into species-specific data frames
+  by_spp <- split(train, train$spp)
+  
+  # fit model for fold
+  coefs_list <- by_spp %>% map(get_coefs_i, start)
+  coefs <- as.data.frame(do.call(rbind, coefs_list))
+  # get predictions
+  yhat <- predict.dbh.i(test, coefs)
+  # calc RMSE
+  caret::RMSE(yhat, test$delta_dbh)
+}
+
+# calculate RMSEs for folds and save results
+ia_results <- 
+  rbind(ia_results, 
+        data.frame(type = "whole interval",
+                   rmse = map_dbl(folds$splits, rmse_i, start_i)))
+```
+
+```{r responseComparison}
+# print boxplots
+ia_results %>% ggplot(aes(rmse, type)) +
+  geom_boxplot() + geom_point(alpha = .4, size = 3) +
+  labs(title = "Distributions of Cross Validation RMSEs",
+       subtitle = "with three different response types") +
+  scale_y_discrete(name = "response type")
+```
+
+```{r final}
+# split into species-specific data frames
+by_spp <- split(train, train$spp)
+
+# train species specific models and get coefficients
+coefs_list <- by_spp %>% map(get_coefs_a, start)
+dbh_growth_coefs <- as.data.frame(do.call(rbind, coefs_list))
+
+predict.dbhgrowth <- function(df) {
+  exp(dbh_growth_coefs[df$spp, "b30"] +
+      dbh_growth_coefs[df$spp, "b31"] * log(df$dbh) +
+      dbh_growth_coefs[df$spp, "b32"] * df$dbh +
+      dbh_growth_coefs[df$spp, "b33"] * df$bal +
+      dbh_growth_coefs[df$spp, "b34"] * sqrt(df$ba) +
+      dbh_growth_coefs[df$spp, "b35"] * df$site_class)
+}
+
+predtimes <- sapply(1:30, function(k) {
+  system.time(predict.dbhgrowth(train[sample(1:nrow(train), 100000, 
+                                             replace = F), ]))[[3]]
+})
+
+dbh_growth_model_nls <- list(dbh_growth_coefs, predict.dbhgrowth)
+size <- lobstr::obj_size(dbh_growth_model_nls)
+
+saveRDS(dbh_growth_model_nls, file = "dbh-growth-model-nls.rds")
+```
+
+## Final Model
+
+There was no significant difference in accuracy between the three models with differing response types. The annualized model with nonlinear interpolation had a slightly lower mean cross validation RMSE than the other two, so it was chosen for the final model, which uses species-specific coefficients and was fitted to the whole training set. The final model has an RMSE of `r round(mean(ia_results$rmse[ia_results$type == "nonlinear interpolation"]), 3)` inches per year, estimated with 10-fold cross validation. It averages `r round(mean(predtimes)/100, 4)` seconds to make 1,000 predictions (on this computer) and takes up `r round(size / 1000000, 3)` megabytes in memory. 
+

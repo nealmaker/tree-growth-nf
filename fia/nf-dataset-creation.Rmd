@@ -130,7 +130,6 @@ for(state in states){
 
 GRM <- lapply(states, function(x){
   read.csv(paste(x, "_TREE_GRM_COMPONENT.csv", sep = ""), header = T) %>%
-    filter(!is.na(ANN_DIA_GROWTH)) %>%
     select(TRE_CN, STATECD, DIA_BEGIN, DIA_MIDPT, DIA_END, ANN_DIA_GROWTH,
            HT_BEGIN, HT_MIDPT, HT_END, ANN_HT_GROWTH)
 })
@@ -158,7 +157,7 @@ for(state in states){
 
 Records for individual trees were joined to plot and condition data to add site and stand attributes, and data from remeasured plots were joined to data from previous inventories to add starting and ending measurements. Records for trees without remeasurement data were discarded, along with records for trees that were already dead at their starting measurement, trees that were incorrectly inventoried during starting or ending inventories, and seedlings with diameters measured at the root collar instead of at breast height. FIA plot designs varied in the past in different years and locations, and we only used inventories that employed the current, standard plot design. This design started being used in the mid 1990s, and allows easy comparison between inventories from different times and places.
 
-Some of the variables retained from the FIA tables were recorded in the field, while others were determined remotely by the FIA Program. We also calculated a number of variables ourselves after the fact. These include plot basal area and tree overtopping basal area, which we calculated by grouping trees into their respective plots and subplots; species-specific plot basal area and overtopping basal area; and diameter, height, and crown ratio growth rates, which we calculated using remeasurement data. Diameter and height growth rates are also reported in the FIA database, but the FIA Program estimates diameter rates using a model instead of calculating them from the remeasurement data, making them unsuitable for training new models.
+Some of the variables retained from the FIA tables were recorded in the field, while others were determined remotely by the FIA Program. A number of variables were also calculated after the fact in this analysis. These include plot basal area and tree overtopping basal area, which were calculated by grouping trees into their respective plots and subplots; species-specific plot basal area and overtopping basal area; and diameter, height, and crown ratio growth rates, which were calculated using remeasurement data. Diameter and height growth rates are also reported in the FIA database, but the FIA Program estimates diameter rates using a model instead of calculating them from the remeasurement data, making them unsuitable for training new models.
 
 ```{r bal}
 ################################################################################
@@ -281,6 +280,90 @@ names(temp) <- str_replace(paste0("bal_", levels(nf_trees$SPCD)), " ", ".")
 nf_trees <- cbind(nf_trees, temp)
 ```
 
+In addition to the previously well defined variables mentioned above, a new competition index was created in hopes that it would better account for competitive effects at the neighborhood scale. It is based very loosely on the sail light index used by Charles Canham and others in the Sortie-ND simulation software (see www.sortie-nd.org/help/manuals/help/data/light_behaviors/sail_light.html) and is called the porous sail index, or PSI. Unlike the sail light index, which maps the locations of individual tree crowns to determine their effect on incoming solar radiation, the PSI quantifies the overall light-blocking ability of individual trees and uses that as a proxy for competitive effect, regardless of trees' specific locations within the plot.
+
+To calculate PSI, a porous sail value is first assigned to every live tree in the plot. The porous sail value is proportional to the crown's total light blocking area ($B$), calculated as the sectional area of a tree's crown ($A$), based on its height ($h$) and width ($w$), multiplied by the crown density ($d$), which is the proportion of light blocked through the crown's section. 
+$$B = A d = \pi d \frac{h}{2} \frac{w}{2}$$ 
+Since crown height can be roughly derived from tree height ($H$) and crown ratio ($r$, expressed as a proportion) as $h = H r$, the relationship can be rewritten as: 
+$$B = \frac{\pi d H r w}{4}$$
+Crown density and crown width are unknown, so two crude assumptions are made. The first is that the crown density is directly proportional to crown ratio, such that $d = c_1 r$, where $c_1$ is a constant. This relationship came from an examination of FIA data, and is roughly accurate. The second assumption is that the ratio of crown width to crown height is fixed across all trees, such that $w = c_2 h = c_2 H r$, where $c_2$ is a constant. This is a more problematic assumption, as different species have inherently different crown shapes, which will cause the PSI to systematically overestimate the influence of some species and underestimate the influence of others. Still, it is the best we can do without knowing crown widths, and it is no more problematic than overtopping basal area, which suffers from the same faulty assumption and is widely used. Incorporating these assumptions:
+$$B = \frac{\pi c_1 H r^2 w}{4} = \frac{\pi c_1 c_2 H^2 r^3}{4}$$
+The porous sail value ($P$) only needs to be proportional to the light blocking area, so:
+$$P = H^2r^3 \propto B$$
+
+The porous sail index for a given tree is the sum of neighboring trees' porous sail values, weighted by their heights relative to the target tree's height. 
+$$PSI_t = \sum_{i=1}^{n-1} \left(P_i \frac{H_i}{H_t}\right)$$
+where $PSI$ is the porous sail index, $t$ denotes the target tree, $n$ is the number of trees in the plot, and $i$ denotes one of the $n-1$ neighboring trees.
+
+```{r porous_sail_index}
+# PSI can only be calculated on subplots where all live trees have cr and ht
+trees_sub <- nf_trees %>% 
+  group_by(PLT_CN, SUBP) %>% 
+  mutate(include = sum(!is.na(CR) & !is.na(HT) & STATUSCD == 1) / 
+           sum(STATUSCD == 1) == 1) %>% 
+  ungroup() %>% 
+  filter(include) %>% 
+  select(-include)
+
+# porous sail (ps) is measure of a tree's light blocking, based on the  
+# crude assumptions that the ratio of crown width to height is fixed and that 
+# crown density is linearly correlated with crown ratio (supported by FIA data).
+trees_sub <- trees_sub %>% 
+  mutate(ps = if_else(STATUSCD == 1, 
+                       ((CR / 100) ^ 3) * (HT ^ 2),
+                       0))
+
+
+################################################################################
+# Calculate PSI for each tree
+################################################################################
+
+# porous sail index (psi) is sum of trees' ps in subplot affecting target  
+# tree, where ps is weighted based on height relative to target tree height.
+# Function assumes trees are in same subplot:
+psi <- function(ht, ps){
+  sapply(1:length(ht), function(i){
+    sum((ht[-i] / ht[i]) * ps[-i])
+  })
+}
+
+trees_sub <- trees_sub %>% 
+  group_by(PLT_CN, SUBP) %>% 
+  mutate(psi = psi(HT, ps)) %>% 
+  ungroup()
+
+
+################################################################################
+# Calculate species-specific PSI for each tree
+################################################################################
+
+# Calculates porous sail index (psi) of one species only, assuming all
+# input trees are in same subplot:
+psi <- function(ht, ps, spp, sppref){
+  ps[spp != sppref] <- 0
+  sapply(1:length(ht), function(i){
+    sum((ht[-i] / ht[i]) * ps[-i])
+  })
+}
+
+spppsi <- lapply(levels(nf_trees$SPCD), function(i) {
+  temp <- trees_sub %>% group_by(PLT_CN, SUBP) %>%
+    mutate(spppsi = psi(HT, ps, spp = SPCD, sppref = i)) %>%
+    ungroup()
+  return(temp$spppsi)
+})
+
+temp <- as.data.frame(do.call(cbind, spppsi))
+names(temp) <- str_replace(paste0("psi_", levels(nf_trees$SPCD)), " ", ".")
+trees_sub <- cbind(trees_sub, temp)
+
+
+## Add new data to nf_trees ----------------------------------------------------
+trees_sub <- select(trees_sub, CN, psi:psi_yellow.birch)
+nf_trees <- left_join(nf_trees, trees_sub, by = "CN")
+
+rm(trees_sub, psi, spppsi, temp)
+```
 
 ```{r before_and_after}
 ################################################################################
@@ -307,6 +390,7 @@ nf_end <- nf_trees %>%
          MEASDAY_E = MEASDAY,
          ba1_e = ba,
          bal1_e = bal,
+         psi1_e = psi,
          ht_e = HT,
          forest_type_e = FORTYPCD,
          stocking_e = ALSTKCD,
@@ -315,7 +399,8 @@ nf_end <- nf_trees %>%
          slope_e = SLOPE,
          aspect_e = ASPECT,
          designcd_e = DESIGNCD) %>%
-  select(-SPCD, -starts_with("ba_"), -starts_with("bal_"), -SUBP)
+  select(-SPCD, -starts_with("ba_"), -starts_with("bal_"), 
+         -starts_with("psi_"), -SUBP)
 
 nf_start <- nf_trees %>%
   filter(CN %in% nf_end$PREV_TRE_CN) %>%
@@ -335,6 +420,7 @@ nf_start <- nf_trees %>%
          MEASDAY_S = MEASDAY,
          ba1_s = ba,
          bal1_s = bal,
+         psi1_s = psi,
          ht_s = HT,
          forest_type_s = FORTYPCD,
          stocking_s = ALSTKCD,
@@ -349,7 +435,7 @@ nf_fia <- nf_end %>%
   left_join(nf_start, by = c("PREV_TRE_CN" = "cn_s")) %>%
   filter(statuscd_s == 1, # only trees that started live
          statuscd_e != 0, # remove trees that were remeasured incorrectly
-         cr_s >= 0,       # only trees that had cr at start
+         #cr_s >= 0,       # only trees that had cr at start
          designcd_s == 1, # only those with current plot design
          designcd_e == 1) %>%   
   mutate(MEASMON_E = formatC(MEASMON_E, width = 2, format = "d", flag = "0"),
@@ -368,6 +454,7 @@ nf_fia <- nf_end %>%
          dbh_mid = (dbh_e + dbh_s)/2,
          ba1_mid = (ba1_e + ba1_s)/2,
          bal1_mid = (bal1_e + bal1_s)/2,
+         psi1_mid = (psi1_e + psi1_s)/2,
          ht_mid = (ht_e + ht_s)/2,
          ht_rate = (ht_e - ht_s)/interval,
          status_change = case_when(statuscd_e == 1 ~ "lived",
@@ -380,19 +467,20 @@ nf_fia <- nf_end %>%
   rename(ba1_ac = ba_ac) %>%
   select(cn_e, spp = SPCD, dbh_e, dbh_rate, cr_s, cr_mid,
          cr_e, cr_rate, crown_class_s, crown_class_e, tree_class_s,
-         tree_class_e, ba1_s, ba1_mid, ba1_e,
-         bal1_s, bal1_mid, bal1_e, ht_s, ht_mid, ht_e, ht_rate,
+         tree_class_e, ba1_s, ba1_mid, ba1_e, bal1_s, bal1_mid, bal1_e, 
+         psi1_s, psi1_mid, psi1_e, ht_s, ht_mid, ht_e, ht_rate,
          forest_type_s, forest_type_e, stocking_s, stocking_e,
          landscape_s, landscape_e, site_class_s, site_class_e,
          slope_s, slope_e, aspect_s, aspect_e, lat = LAT, lon = LON,
          elev = ELEV, date_s, date_e, interval, status_change,
          plot = plt_cn_e, ba1_ac, plt_cn_s, SUBP,
-         starts_with("ba_"), starts_with("bal_")) %>%
+         starts_with("ba_"), starts_with("bal_"), starts_with("psi_")) %>%
   # mortality year was all null and was removed
   inner_join(nf_grms, by = c("cn_e" = "TRE_CN")) %>%
   # use these dbh's b/c inconsistencies have been resolved (eg. measurements at different heights)
   rename(dbh_s = DIA_BEGIN, dbh_mid = DIA_MIDPT,
-         dbh_rate_fia = ANN_DIA_GROWTH, state = STATECD)
+         dbh_rate_fia = ANN_DIA_GROWTH, state = STATECD) %>% 
+  select(-ANN_HT_GROWTH)
 
 
 remove(nf_start, nf_end, nf_conds, nf_plots, nf_trees, nf_grms, states,
@@ -400,42 +488,23 @@ remove(nf_start, nf_end, nf_conds, nf_plots, nf_trees, nf_grms, states,
        sppba, sppbal, temp, species, species_codes, sbal)
 ```
 
-We retained starting and ending values for variables that naturally change from one measurement to another, and calculated midpoint values for some variables by averaging the starting and ending values. Midpoint values were recorded to better reflect average conditions during the remeasurement period.
+Starting and ending values were retained for variables that naturally change from one measurement to another, and midpoint values were calculated for some variables by averaging the starting and ending values. Midpoint values were recorded to better reflect average conditions during the remeasurement period.
 
 Some of the ostensibly fixed variables like slope, aspect, and site class were found to change from one measurement to another in a minority of instances. For example, aspect was recorded differently in `r ifelse(round(100*sum(nf_fia$aspect_e != nf_fia$aspect_s, na.rm = T)/nrow(nf_fia)) >= 10,round(100*sum(nf_fia$aspect_e != nf_fia$aspect_s, na.rm = T)/nrow(nf_fia)), english::words(round(100*sum(nf_fia$aspect_e != nf_fia$aspect_s, na.rm = T)/nrow(nf_fia))))` percent of remeasurements, slope was recorded differently in `r ifelse(round(100*sum(nf_fia$slope_e != nf_fia$slope_s, na.rm = T)/nrow(nf_fia)) >= 10, round(100*sum(nf_fia$slope_e != nf_fia$slope_s, na.rm = T)/nrow(nf_fia)), english::words(round(100*sum(nf_fia$slope_e != nf_fia$slope_s, na.rm = T)/nrow(nf_fia))))` percent of remeasurements, and site class was recorded differently in `r ifelse(round(100*sum(nf_fia$site_class_e != nf_fia$site_class_s, na.rm = T)/nrow(nf_fia)) >= 10, round(100*sum(nf_fia$site_class_e != nf_fia$site_class_s, na.rm = T)/nrow(nf_fia)), english::words(round(100*sum(nf_fia$site_class_e != nf_fia$site_class_s, na.rm = T)/nrow(nf_fia))))` percent of remeasurements, despite the fact that they were measured on the same plots and should have remained constant. The differences between starting and ending values are generally small, however, and are probably measurement errors. In the case of slope, the mean absolute difference of deviating measurements is only `r ifelse(round(mean(abs(nf_fia[nf_fia$slope_s != nf_fia$slope_e,]$slope_e - nf_fia[nf_fia$slope_s != nf_fia$slope_e,]$slope_s), na.rm = T)) < 10, english::words(round(mean(abs(nf_fia[nf_fia$slope_s != nf_fia$slope_e,]$slope_e - nf_fia[nf_fia$slope_s != nf_fia$slope_e,]$slope_s), na.rm = T))), round(mean(abs(nf_fia[nf_fia$slope_s != nf_fia$slope_e,]$slope_e - nf_fia[nf_fia$slope_s != nf_fia$slope_e,]$slope_s), na.rm = T)))` percent. Among erroneous site class measures, the average is only `r ifelse(round(mean(abs(nf_fia[nf_fia$site_class_s != nf_fia$site_class_e,]$site_class_e - nf_fia[nf_fia$site_class_s != nf_fia$site_class_e,]$site_class_s), na.rm = T)) < 10, english::words(round(mean(abs(nf_fia[nf_fia$site_class_s != nf_fia$site_class_e,]$site_class_e - nf_fia[nf_fia$site_class_s != nf_fia$site_class_e,]$site_class_s), na.rm = T))), round(mean(abs(nf_fia[nf_fia$site_class_s != nf_fia$site_class_e,]$site_class_e - nf_fia[nf_fia$site_class_s != nf_fia$site_class_e,]$site_class_s), na.rm = T)))` site class.  Aspect errors tend to be higher, averaging `r ifelse(round(mean(abs(nf_fia[nf_fia$aspect_s != nf_fia$aspect_e,]$aspect_e - nf_fia[nf_fia$aspect_s != nf_fia$aspect_e,]$aspect_s), na.rm = T)) >= 10, round(mean(abs(nf_fia[nf_fia$aspect_s != nf_fia$aspect_e,]$aspect_e - nf_fia[nf_fia$aspect_s != nf_fia$aspect_e,]$aspect_s), na.rm = T)), english::words(round(mean(abs(nf_fia[nf_fia$aspect_s != nf_fia$aspect_e,]$aspect_e - nf_fia[nf_fia$aspect_s != nf_fia$aspect_e,]$aspect_s), na.rm = T))))` degrees, but they can be attributed to the difficulty of determining aspects in relatively flat terrain.  If only plots with slopes over 20 percent are considered, the mean absolute aspect error falls to `r ifelse(round(mean(abs(nf_fia[nf_fia$aspect_e != nf_fia$aspect_s & nf_fia$slope_s > 20,]$aspect_e - nf_fia[nf_fia$aspect_e != nf_fia$aspect_s & nf_fia$slope_s > 20,]$aspect_s), na.rm = T)) < 10, english::words(round(mean(abs(nf_fia[nf_fia$aspect_e != nf_fia$aspect_s & nf_fia$slope_s > 20,]$aspect_e - nf_fia[nf_fia$aspect_e != nf_fia$aspect_s & nf_fia$slope_s > 20,]$aspect_s), na.rm = T))), round(mean(abs(nf_fia[nf_fia$aspect_e != nf_fia$aspect_s & nf_fia$slope_s > 20,]$aspect_e - nf_fia[nf_fia$aspect_e != nf_fia$aspect_s & nf_fia$slope_s > 20,]$aspect_s), na.rm = T)))` degrees. All these discontinuities were assumed to be random measurement errors, and starting values were arbitrarily retained in the dataset while ending values were discarded.
 
 ```{r fixed_vars}
 # Keep starting values for fixed variables & ------------------------------
-# only keep records with all neccessary fields ----------------------------
+# only keep records with all necessary fields ----------------------------
 
 nf_fia <- nf_fia %>%
   rename(landscape = landscape_s,
          site_class = site_class_s,
          slope = slope_s,
          aspect = aspect_s) %>%
-  select(-landscape_e, -site_class_e, -slope_e, -aspect_e) %>%
-  filter(!is.na(spp), # only keep records with all neccessary fields
-         !is.na(dbh_s), # could these affect some trees in a plot but not all?
-         !is.na(crown_class_s),
-         !is.na(tree_class_s),
-         !is.na(ba1_s),
-         !is.na(bal1_s),
-         !is.na(forest_type_s),
-         !is.na(forest_type_e),
-         !is.na(stocking_s),
-         !is.na(stocking_e),
-         !is.na(landscape),
-         !is.na(site_class),
-         !is.na(slope),
-         !is.na(aspect),
-         !is.na(lat),
-         !is.na(lon),
-         !is.na(elev),
-         !is.na(status_change),
-         xor(is.na(bal1_e), status_change == "lived"))
+  select(-landscape_e, -site_class_e, -slope_e, -aspect_e)
 ```
 
-We renamed the variables in the dataset and replaced FIA codes for the levels of categorical variables with descriptive strings, to make them more intuitive and user-friendly. We also grouped tree species into species groups and FIA forest types into more general forest types, so they match common inventory protocols. For example, most species in the genus *Populus* are combined into a single "aspen" group to make data collection easier, although cottonwoods (*Populus deltoides*) are kept in their own group because they exhibit very different growth characteristics. Similarly, the FIA forest types "balsam fir", "white spruce", "red spruce", "red spruce/balsam fir", and "black spruce" were combined into a single "Spruce-fir" group, but "northern white-cedar" was kept in its own "Cedar" group.
+Variables in the dataset were renamed and FIA codes for the levels of categorical variables were replaced with descriptive strings, to make them more intuitive and user-friendly. Tree species were also grouped into species groups and FIA forest types into more general forest types; so they match common inventory protocols and to facilitate the incorporation of uncommon species and forest types into growth models. For example, most species in the genus *Populus* are combined into a single "aspen" group, although cottonwoods (*Populus deltoides*) are kept in their own group because they exhibit very different growth characteristics. Similarly, the FIA forest types "balsam fir", "white spruce", "red spruce", "red spruce/balsam fir", and "black spruce" were combined into a single "Spruce-fir" group, but "northern white-cedar" was kept in its own "Cedar" group.
 
 ```{r categorical_levels}
 ################################################################################
@@ -494,10 +563,54 @@ nf_fia$landscape <- factor(unname(landscapes[as.character(nf_fia$landscape)]),
                            levels = levels(factor(landscapes)))
 ```
 
+# Missing Values
+
+Examination of the data showed that some `r round(100 * (sum(is.na(nf_fia)) / (ncol(nf_fia) * nrow(nf_fia))), 1)`% of the values were missing. The missing values were associated with only a fraction of the variables, depicted in the following table.
+
+```{r na}
+vars_na <- 
+  data.frame(variable = names(nf_fia),  
+             n_NA = colSums(is.na(nf_fia)),
+             pct_NA = round(colMeans(is.na(nf_fia))*100, 2),
+             row.names = NULL) %>% 
+  arrange(desc(n_NA)) %>% 
+  filter(n_NA > 0) 
+
+knitr::kable(vars_na, col.names = c("Variable", "Missing", "% Missing"))
+```
+
+Most of these missing values are associated with porous sail indexes and heights. The FIA program only records heights on a random subset of observations, and the porous sail index can only be calculated on plots in which all live trees have height measurements. So while these missing values limit the amount of data available for training growth models, they are random omissions and should not introduce bias. 
+
+Many of the remaining missing values are mid-interval or end-of-interval values that are missing because the trees died. Across all the data, `r sum(nf_fia$status_change != "lived")` trees died during the remeasurement interval, and these correspond perfectly with the mid-interval and end-of-interval bal missing values. Mid-interval and end-of-interval crown ratio values are also missing for all trees that died, though they are also missing for a small number of trees that lived. End-of-interval dbh values are missing for many of the trees that died, but are present for some of them because they were estimated from stump diameters by the FIA program.
+
+A small number of observations are missing values for other variables too, like ending forest types and stocking, and these appear to be random recording errors that can be safely removed without introducing bias.
+
 ```{r save}
 ################################################################################
 # Finish up
 ################################################################################
+
+nf_fia <- nf_fia %>% 
+  filter(!is.na(spp), # only keep records with all neccessary fields
+         !is.na(dbh_s), # these could affect some trees in a plot, but not all.
+         !is.na(cr_s),
+         !is.na(crown_class_s),
+         !is.na(tree_class_s),
+         !is.na(ba1_s),
+         !is.na(bal1_s),
+         !is.na(forest_type_s),
+         !is.na(forest_type_e),
+         !is.na(stocking_s),
+         !is.na(stocking_e),
+         !is.na(landscape),
+         !is.na(site_class),
+         !is.na(slope),
+         !is.na(aspect),
+         !is.na(lat),
+         !is.na(lon),
+         !is.na(elev),
+         !is.na(status_change),
+         xor(is.na(bal1_e), status_change == "lived"))
 
 remove(forest_type_codes, forest_types, landscape_codes, landscapes)
 
@@ -505,14 +618,16 @@ remove(forest_type_codes, forest_types, landscape_codes, landscapes)
 nf_fia <- nf_fia %>%
   select(spp, dbh_s, dbh_mid, dbh_e, dbh_rate, dbh_rate_fia, cr_s, cr_mid,
          cr_e, cr_rate, crown_class_s, crown_class_e, tree_class_s,
-         tree_class_e, ba1_s, ba1_mid, ba1_e, bal1_s, bal1_mid, bal1_e, ht_s,
+         tree_class_e, ba1_s, ba1_mid, ba1_e, bal1_s, bal1_mid, bal1_e, 
+         psi1_s, psi1_mid, psi1_e, ht_s,
          ht_mid, ht_e, ht_rate, forest_type_s, forest_type_e,
          stocking_s, stocking_e, landscape, site_class, slope, aspect,
          lat, lon, elev, state, date_s, date_e, interval, status_change,
          plot, ba1_ac, plt_cn_s, SUBP,
-         starts_with("ba_"), starts_with("bal_")) %>%
+         starts_with("ba_"), starts_with("bal_"), starts_with("psi_")) %>%
   rename(ba_s = ba1_s, ba_mid = ba1_mid, ba_e = ba1_e,
          bal_s = bal1_s, bal_mid = bal1_mid, bal_e = bal1_e,
+         psi_s = psi1_s, psi_mid = psi1_mid, psi_e = psi1_e,
          ba_ac = ba1_ac)
 
 
@@ -562,6 +677,10 @@ Plot basal area, measured in square feet per acre of all live trees, 1" dbh or g
 __bal__   
 \vspace{2pt}
 Overtopping basal area, measured in square feet per acre. Calculated by computing individual trees' per acre basal areas ($ba * tpa$), then for each tree summing the per acre basal areas of other trees in in the same subplot with larger diameters. Variables whose names end with a species name (such as $bal\_ash$) are overtopping basal areas that only account for overtopping trees of the species indicated.
+
+__psi__   
+\vspace{2pt}
+Porous sail index, whose computation is described in the 'Methods' section above. Variables whose names end with a species name (such as $psi\_ash$) are porous sail indexes that only account for trees of the species indicated.
 
 __ht__   
 \vspace{2pt}
