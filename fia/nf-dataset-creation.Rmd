@@ -157,7 +157,7 @@ for(state in states){
 
 Records for individual trees were joined to plot and condition data to add site and stand attributes, and data from remeasured plots were joined to data from previous inventories to add starting and ending measurements. Records for trees without remeasurement data were discarded, along with records for trees that were already dead at their starting measurement, trees that were incorrectly inventoried during starting or ending inventories, and seedlings with diameters measured at the root collar instead of at breast height. FIA plot designs varied in the past in different years and locations, and we only used inventories that employed the current, standard plot design. This design started being used in the mid 1990s, and allows easy comparison between inventories from different times and places.
 
-Some of the variables retained from the FIA tables were recorded in the field, while others were determined remotely by the FIA Program. A number of variables were also calculated after the fact in this analysis. These include plot basal area and tree overtopping basal area, which were calculated by grouping trees into their respective plots and subplots; species-specific plot basal area and overtopping basal area; and diameter, height, and crown ratio growth rates, which were calculated using remeasurement data. Diameter and height growth rates are also reported in the FIA database, but the FIA Program estimates diameter rates using a model instead of calculating them from the remeasurement data, making them unsuitable for training new models.
+Some of the variables retained from the FIA tables were recorded in the field, while others were determined remotely by the FIA Program. A number of variables were also calculated after the fact in this analysis. These include plot basal area and tree overtopping basal area, which were calculated by grouping trees into their respective plots and subplots; species-specific plot basal area and overtopping basal area; species richness within subplots; coefficients of variation of dbh and height as measures of subplot structural diversity; and diameter, height, and crown ratio growth rates, which were calculated using remeasurement data. Diameter and height growth rates are also reported in the FIA database, but the FIA Program estimates diameter rates using a model instead of calculating them from the remeasurement data, making them unsuitable for training new models.
 
 ```{r bal}
 ################################################################################
@@ -236,6 +236,32 @@ nf_trees[nf_trees$STATUSCD == 1,] <- nf_trees[nf_trees$STATUSCD == 1,] %>%
 
 
 ################################################################################
+# Calculate measures of diversity
+################################################################################
+
+# Subplot diversity, based on census of subplot trees
+# Species Richness & Structural Diversity Based On DBH -------------------------
+nf_trees <- nf_trees %>% 
+  group_by(PLT_CN, SUBP) %>% 
+  mutate(spp_rich = length(unique(SPCD)),
+         dbh_var = sd(DIA, na.rm = T)/mean(DIA, na.rm = T)) %>% 
+  ungroup()
+
+# Structural Diversity Based On HT ---------------------------------------------
+# can only calculate on subplots where all live trees have ht data
+trees_sub <- nf_trees %>% 
+  group_by(PLT_CN, SUBP) %>% 
+  mutate(include = sum(!is.na(HT) & STATUSCD == 1) / 
+           sum(STATUSCD == 1) == 1) %>% 
+  filter(include) %>% 
+  mutate(ht_var = sd(HT, na.rm = T) / mean(HT, na.rm = T)) %>% 
+  ungroup() %>% 
+  select(CN, ht_var)
+
+nf_trees <- left_join(nf_trees, trees_sub, by = "CN")
+  
+
+################################################################################
 # Calculate species-specific BAL & plot BA for each tree
 ################################################################################
 
@@ -284,11 +310,11 @@ In addition to the previously well defined variables mentioned above, a new comp
 
 To calculate PSI, a porous sail value is first assigned to every live tree in the plot. The porous sail value is proportional to the crown's total light blocking area ($B$), calculated as the sectional area of a tree's crown ($A$), based on its height ($h$) and width ($w$), multiplied by the crown density ($d$), which is the proportion of light blocked through the crown's section. 
 $$B = A d = \pi d \frac{h}{2} \frac{w}{2}$$ 
-Since crown height can be roughly derived from tree height ($H$) and crown ratio ($r$, expressed as a proportion) as $h = H r$, the relationship can be rewritten as: 
+Since crown height can be roughly derived from tree height ($H$) and crown ratio ($r$, expressed as a proportion) as $h = H r$, the relationship can be rewritten as 
 $$B = \frac{\pi d H r w}{4}$$
-Crown density and crown width are unknown, so two crude assumptions are made. The first is that the crown density is directly proportional to crown ratio, such that $d = c_1 r$, where $c_1$ is a constant. This relationship came from an examination of FIA data, and is roughly accurate. The second assumption is that the ratio of crown width to crown height is fixed across all trees, such that $w = c_2 h = c_2 H r$, where $c_2$ is a constant. This is a more problematic assumption, as different species have inherently different crown shapes, which will cause the PSI to systematically overestimate the influence of some species and underestimate the influence of others. Still, it is the best we can do without knowing crown widths, and it is no more problematic than overtopping basal area, which suffers from the same faulty assumption and is widely used. Incorporating these assumptions:
+Crown density and crown width are unknown, so two crude assumptions are made. The first is that the crown density is directly proportional to crown ratio, such that $d = c_1 r$, where $c_1$ is a constant. This relationship came from an examination of FIA data, and is roughly accurate. The second assumption is that the ratio of crown width to crown height is fixed across all trees, such that $w = c_2 h = c_2 H r$, where $c_2$ is a constant. This is a more problematic assumption, as different species have inherently different crown shapes, which will cause the PSI to systematically overestimate the influence of some species and underestimate the influence of others. Still, it is the best we can do without knowing crown widths, and it is no more problematic than overtopping basal area, which suffers from the same faulty assumption and is widely used. Incorporating these assumptions,
 $$B = \frac{\pi c_1 H r^2 w}{4} = \frac{\pi c_1 c_2 H^2 r^3}{4}$$
-The porous sail value ($P$) only needs to be proportional to the light blocking area, so:
+The porous sail value ($P$) only needs to be proportional to the light blocking area, so
 $$P = H^2r^3 \propto B$$
 
 The porous sail index for a given tree is the sum of neighboring trees' porous sail values, weighted by their heights relative to the target tree's height. 
@@ -388,6 +414,9 @@ nf_end <- nf_trees %>%
          MEASYEAR_E = MEASYEAR,
          MEASMON_E = MEASMON,
          MEASDAY_E = MEASDAY,
+         spp_rich_e = spp_rich,
+         dbh_var_e = dbh_var,
+         ht_var_e = ht_var,
          ba1_e = ba,
          bal1_e = bal,
          psi1_e = psi,
@@ -418,6 +447,9 @@ nf_start <- nf_trees %>%
          MEASYEAR_S = MEASYEAR,
          MEASMON_S = MEASMON,
          MEASDAY_S = MEASDAY,
+         spp_rich_s = spp_rich,
+         dbh_var_s = dbh_var,
+         ht_var_s = ht_var,
          ba1_s = ba,
          bal1_s = bal,
          psi1_s = psi,
@@ -452,6 +484,9 @@ nf_fia <- nf_end %>%
          cr_mid = (cr_e + cr_s)/2,
          dbh_rate = (dbh_e - dbh_s)/interval,
          dbh_mid = (dbh_e + dbh_s)/2,
+         spp_rich_mid = (spp_rich_e + spp_rich_s)/2,
+         dbh_var_mid = (dbh_var_e + dbh_var_s)/2,
+         ht_var_mid = (ht_var_e + ht_var_s)/2,
          ba1_mid = (ba1_e + ba1_s)/2,
          bal1_mid = (bal1_e + bal1_s)/2,
          psi1_mid = (psi1_e + psi1_s)/2,
@@ -467,7 +502,9 @@ nf_fia <- nf_end %>%
   rename(ba1_ac = ba_ac) %>%
   select(cn_e, spp = SPCD, dbh_e, dbh_rate, cr_s, cr_mid,
          cr_e, cr_rate, crown_class_s, crown_class_e, tree_class_s,
-         tree_class_e, ba1_s, ba1_mid, ba1_e, bal1_s, bal1_mid, bal1_e, 
+         tree_class_e, spp_rich_s, spp_rich_mid, spp_rich_e, dbh_var_s, 
+         dbh_var_mid, dbh_var_e, ht_var_s, ht_var_mid, ht_var_e, ba1_s, 
+         ba1_mid, ba1_e, bal1_s, bal1_mid, bal1_e, 
          psi1_s, psi1_mid, psi1_e, ht_s, ht_mid, ht_e, ht_rate,
          forest_type_s, forest_type_e, stocking_s, stocking_e,
          landscape_s, landscape_e, site_class_s, site_class_e,
@@ -618,9 +655,10 @@ remove(forest_type_codes, forest_types, landscape_codes, landscapes)
 nf_fia <- nf_fia %>%
   select(spp, dbh_s, dbh_mid, dbh_e, dbh_rate, dbh_rate_fia, cr_s, cr_mid,
          cr_e, cr_rate, crown_class_s, crown_class_e, tree_class_s,
-         tree_class_e, ba1_s, ba1_mid, ba1_e, bal1_s, bal1_mid, bal1_e, 
-         psi1_s, psi1_mid, psi1_e, ht_s,
-         ht_mid, ht_e, ht_rate, forest_type_s, forest_type_e,
+         tree_class_e, spp_rich_s, spp_rich_mid, spp_rich_e, dbh_var_s,
+         dbh_var_mid, dbh_var_e, ht_var_s, ht_var_mid, ht_var_e, ba1_s, 
+         ba1_mid, ba1_e, bal1_s, bal1_mid, bal1_e, psi1_s, psi1_mid, psi1_e, 
+         ht_s, ht_mid, ht_e, ht_rate, forest_type_s, forest_type_e,
          stocking_s, stocking_e, landscape, site_class, slope, aspect,
          lat, lon, elev, state, date_s, date_e, interval, status_change,
          plot, ba1_ac, plt_cn_s, SUBP,
@@ -669,6 +707,18 @@ General quality of a live tree. From $TREE\$TREECLCD$:
 &nbsp;&nbsp;&nbsp;&nbsp;*2* Growing-stock (of commercial species and meeting minimum merchantability standards)  
 &nbsp;&nbsp;&nbsp;&nbsp;*3* Rough-cull (sound wood, but does not meet minimum merchantability standards)  
 &nbsp;&nbsp;&nbsp;&nbsp;*4* Rotten-cull (does not meet minimum merchantability standards and more than half of cull is rotten)  
+
+__spp_rich__   
+\vspace{2pt}
+Subplot species richness, calculated as the total number of unique species occurring on each subplot.
+
+__dbh_var__   
+\vspace{2pt}
+Coefficient of variation of trees' diameters at breast height within each subplot, used as a measure of structural diversity. Calculated by dividing the standard deviation of diameters by their mean. 
+
+__ht_var__   
+\vspace{2pt}
+Coefficient of variation of trees' heights within each subplot, used as a measure of structural diversity. Calculated by dividing the standard deviation of heights by their mean. 
 
 __ba__  
 \vspace{2pt}

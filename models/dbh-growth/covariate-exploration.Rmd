@@ -35,19 +35,17 @@ Subplot or plot level covariates need to be calculated in "nf-dataset-creation.R
   
 - better, custom competition index (subplot level; based on estimated crown volumes, estimated light interception, and difference in height from target tree)
 
-- spp diversity (subplot level or even plot level)
+- spp diversity (subplot level)
 
-  - richness (total # spp on plot; Menhinick’s Index; Margalefs index; or omit b/c Hill diversity accounts for richness already)
+  With random samples of stands, would probably use hill diversity and standardize coverage between stands [see Roswell et al. 2021]. Alternately, could use Meninick's or Margalefs indexes for richness and Gini-Simpson's or Shannon-Wiener indexes for eveness [Simpsons might be more statistically appropriate, but Shannon is mores sensitive to richness, which is important].
   
-  - eveness (Gini-Simpson’s Index, Shannon-Wiener Index [makes some assumptions that we would break, Simpsons might be more statistically appropriate, but Shannon is mores sensitive to richness, which is important], or Hill diversity [apparently the best]; also should standardize sample based on coverage [see Roswell et al. 2021]
+  Big problem here is we're interested in diversity in single plots (n=1). Above metrics don't work without a real sample. I think all we could do is consider individual plots the units of interest (not the larger stands they're in) and calculate species richness directly (since we have a census of each plot). The assumption here would be that a tree's growth is only influenced by the diversity of the 1/24th acre neighborhood it's in and not by the diversity of the larger stand (probably not too unreasonable an assumption).   
   
 - structural diversity (subplot or plot level)
 
-  - coeficient of variation of heights (sd/mean, see Brassard et al., 2008), or use spp eveness index with size classes (Buongiorno et al., 1994; Dănescu et al., 2016; Magurran, 2004; Staudhammer and LeMay, 2001)
+  - coefficient of variation of heights (sd/mean, see Brassard et al., 2008), or use spp eveness index with size classes (Buongiorno et al., 1994; Dănescu et al., 2016; Magurran, 2004; Staudhammer and LeMay, 2001; but probably can't because of lack of sample)
   
-  - coeficient of variation of dbh (sd/mean, see Brassard et al., 2008), or use spp eveness index with size classes (Buongiorno et al., 1994; Dănescu et al., 2016; Magurran, 2004; Staudhammer and LeMay, 2001)
-  
-
+  - coefficient of variation of dbh (sd/mean, see Brassard et al., 2008), or use spp eveness index with size classes (Buongiorno et al., 1994; Dănescu et al., 2016; Magurran, 2004; Staudhammer and LeMay, 2001; but probably can't because of lack of sample)
 
 # Data
 
@@ -65,27 +63,31 @@ load(temp)
 
 # remove trees that died and unwanted variables
 nf_fia <- nf_fia %>%
-  filter(status_change == "lived") %>%
+  filter(status_change == "lived",
+         !is.na(psi_mid), !is.na(ht_mid)) %>%
   select(dbh_rate, spp, dbh_mid, cr_mid, ht_mid, crown_class_s, tree_class_s,
+         ba_mid, bal_mid, psi_mid, spp_rich_mid, dbh_var_mid, ht_var_mid, 
          forest_type_s, stocking_s, landscape,
-         site_class, slope, aspect, lat, lon, elev, ba_ash:bal_yellow.birch,
+         site_class, slope, aspect, lat, lon, elev, ba_ash:psi_yellow.birch,
          interval, plot) %>%
-  rename(dbh = dbh_mid, cr = cr_mid, crown_class = crown_class_s,
-         tree_class = tree_class_s, forest_type = forest_type_s, stocking = stocking_s)
+  rename(dbh = dbh_mid, cr = cr_mid, ht = ht_mid, crown_class = crown_class_s,
+         tree_class = tree_class_s, ba = ba_mid, bal = bal_mid, psi = psi_mid, 
+         spp_rich = spp_rich_mid, dbh_var = dbh_var_mid, ht_var = ht_var_mid, 
+         forest_type = forest_type_s, stocking = stocking_s)
 })})
 ```
 
-Forest Inventory and Analysis data were used from the US Northern Forest region. They consist of observations of `r nrow(nf_fia)` remeasured trees, located in `r length(unique(nf_fia[, ncol(nf_fia)]))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/tree-growth-nf/blob/master/fia/nf-dataset-creation.pdf).
+Forest Inventory and Analysis data were used from the US Northern Forest region. For this analysis, only data that includes measures of porous sail index (our new competition index) and height were used. They consist of observations of `r nrow(nf_fia)` remeasured trees, located in `r length(unique(nf_fia[, ncol(nf_fia)]))` unique sample plots. Details are available at the project's [GitHub page](https://github.com/nealmaker/tree-growth-nf/blob/master/fia/nf-dataset-creation.pdf).
 
 Preliminary analysis using [nonlinear least squares models](https://github.com/nealmaker/tree-growth-nf/blob/master/models/dbh-growth/nls-model.Rmd) demonstrated the value of using the annualized diameter growth rate as a response variable, instead of using the change in diameter over the entire remeasurement period. For this reason, the annualized diameter at breast height ($DBH\_rate$) was used, and mid-period values were used for mutable individual tree attributes to better reflect the average conditions over the remeasurement period. These were calculated as the average of the starting and ending values.
 
-The data include `r ncol(nf_fia) - 2` potential predictors (features), which include individual tree attributes as well as plot-level attributes and site attributes. Three of the predictors are non-ordinal categorical variables, three are ordinal categorical variables, and the rest are numeric. Many of the numeric predictors are species-specific basal areas and species-specific overtopping basal areas. In aggregate, these fully describe basal area and overtopping basal area for each observation. Total basal area and overtopping basal area were therefore omitted from the covariates to prevent perfect collinearities. 
+The data include `r ncol(nf_fia) - 2` potential predictors (features), which include individual tree attributes as well as plot-level attributes and site attributes. Three of the predictors are non-ordinal categorical variables, three are ordinal categorical variables, and the rest are numeric. Many of the numeric predictors are species-specific basal areas, species-specific overtopping basal areas and species-specific porous sail indexes.  
 
 ```{r split, cache=TRUE}
 # test set is 20% of full dataset
 test_size <- .2
 
-# define test set based on plots (to make it truely independent)
+# define test set based on plots (to make it truly independent)
 set.seed(10)
 test_plots <- sample(unique(nf_fia$plot),
                      size = round(test_size * length(unique(nf_fia$plot))),
@@ -98,20 +100,10 @@ nf_fia <- select(nf_fia, -plot, -interval)
 
 train <- nf_fia[-index, ]
 test <- nf_fia[index, ]
-
-# sample from training data to expedite algorithm testing
-subsamp_size <- 10000
-set.seed(201)
-subsamp <- sample(1:nrow(train),
-                  size = subsamp_size,
-                  replace = FALSE)
-
-trainsub <- train[subsamp, ]
 ```
 
 Data from `r 100 * test_size`% of all the sample plots was set aside for testing. Data were split based on plots to make sure that the testing data was truly independent. The data from the remaining `r 100 * (1 - test_size)`% of plots were used to explore different algorithms and to train the final model. These testing and training sets are the same that were used in training and testing a nonlinear least squares model previously, and as with the nonlinear least squares model, the training data was not used in this analysis so that the model created here can be compared to others without data leakage. 
 
-Spot checking of numerous algorithms would have been very slow on all the training data, so a random sample of `r subsamp_size` observations was drawn from the training data and used instead.
 
 # Preprocessing
 
@@ -123,7 +115,7 @@ Nominal categorical variables were re-coded using dummy encoding, to allow for t
 
 Numeric predictors were normalized using Yeo-Johnson transformation and were centered and scaled to put them in similar units. This can help improve the accuracy of many models, and can alleviate problems with parametric models that work better with normally distributed covariates. Yeo-Johnson transformation was chosen because some of the features contain negative values. 
 
-A test was done using Random forest algorithms to assess the effect of standardizing and normalizing dummy-encoded variables and the sparse, species-specific basal areas and overtopping basal areas.
+A test was done using Random forest algorithms to assess the effect of standardizing and normalizing dummy-encoded variables and the sparse, species-specific basal areas, overtopping basal areas and porous sail indexes.
 
 ```{r testOptions, cache=TRUE}
 # Cross validation
@@ -136,11 +128,14 @@ metric <- "RMSE"
 # Recipes with and without standardizing dummies 
 dbh_recipe1 <- recipe(dbh_rate ~ ., data = train) %>% 
   step_YeoJohnson("dbh", "cr", "crown_class", "tree_class", "stocking",
-                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
+                  "site_class", "slope", "aspect", "lat", "lon", "elev",
+                  "spp_rich", "dbh_var", "ht_var") %>% 
   step_center("dbh", "cr", "crown_class", "tree_class", "stocking",
-                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
+                  "site_class", "slope", "aspect", "lat", "lon", "elev",
+                  "spp_rich", "dbh_var", "ht_var") %>% 
   step_scale("dbh", "cr", "crown_class", "tree_class", "stocking",
-                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
+                  "site_class", "slope", "aspect", "lat", "lon", "elev",
+                  "spp_rich", "dbh_var", "ht_var") %>% 
   step_dummy(all_nominal(), -all_outcomes()) %>% 
   step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
   step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
@@ -161,10 +156,10 @@ invisible({capture.output({
   registerDoParallel(cl)
   
   set.seed(seed)
-  fit.nodum <- train(dbh_recipe1, trainsub, method = 'ranger', 
+  fit.nodum <- train(dbh_recipe1, train, method = 'ranger', 
                      metric=metric, trControl=control)
   set.seed(seed)
-  fit.dum <- train(dbh_recipe2, trainsub, method = 'ranger', 
+  fit.dum <- train(dbh_recipe2, train, method = 'ranger', 
                    metric=metric, trControl=control)
   
   stopCluster(cl)
@@ -174,3 +169,268 @@ invisible({capture.output({
 results <- resamples(list(standardized = fit.dum, not = fit.nodum))
 scales <- list(x=list(relation="free"), y=list(relation="free"))
 bwplot(results, scales = scales)
+```
+Because the standardization and normalization didn't affect accuracy in any meaningful way and were slightly faster than leaving dummy-encoded and sparse variables un-standardized and abnormal, standardization and normalization were used on all numeric variables going forward. 
+
+# Effects of Covariates
+
+To start, a random forest model of dbh rate was constructed using all of the available covariates except for the species specific competition metrics (which are explored in more depth later). Variable importance scores were calculated to get a sense of which covariates are the most useful overall.
+
+```{r varimp}
+train_varimp <- train[, 1:22]
+
+dbh_recipe0 <- recipe(dbh_rate ~ ., data = train_varimp) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+# Train w/ RF
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.varimp <- train(dbh_recipe0, train_cr, method = 'ranger', 
+                     metric=metric, trControl=trainControl("none"),
+                     importance = "impurity")
+  
+  stopCluster(cl)
+})})
+
+
+```
+
+## DBH to Height Ratio
+
+To address the first goal, three models were compared that were identical except that one used crown ratio without dbh to height ratio or height as covariates, the second used crown ratio and height, but not dbh to height ratio, and the third used dbh to height ratio without crown ratio. Only four other covariates were used in these models (species, dbh, ba, and bal) for simplicity.
+
+```{r cr_vs_dbh.ht}
+train_cr <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, bal)
+
+train_cr_ht <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ht, ba, bal)
+
+train_dbh_ht <- train %>% 
+  mutate(dbh_ht = dbh/ht) %>% 
+  select(dbh_rate, spp, dbh, dbh_ht, ba, bal)
+
+# Recipes
+dbh_recipe3 <- recipe(dbh_rate ~ ., data = train_cr) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe4 <- recipe(dbh_rate ~ ., data = train_cr_ht) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe5 <- recipe(dbh_rate ~ ., data = train_dbh_ht) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+# Train w/ RF
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.cr <- train(dbh_recipe3, train_cr, method = 'ranger', 
+                     metric=metric, trControl=control)
+  set.seed(seed)
+  fit.cr_ht <- train(dbh_recipe4, train_cr_ht, method = 'ranger', 
+                   metric=metric, trControl=control)
+  set.seed(seed)
+  fit.dbh_ht <- train(dbh_recipe5, train_dbh_ht, method = 'ranger', 
+                   metric=metric, trControl=control)
+  
+  stopCluster(cl)
+})})
+
+# Compare
+results1 <- resamples(list(cr = fit.cr, cr_ht = fit.cr_ht, dbh_ht = fit.dbh_ht))
+bwplot(results1, scales = scales)
+```
+Results show that dbh to height ratio is a poor substitute for crown ratio. While it pairs better with some of the older datasets out there, doing away with crown ratio would mean a sacrifice in accuracy. When crown ratio is used, the addition of height does seem to improve accuracy, but only slightly.
+
+## Porous Sail Index
+
+The porous sail index is a new competition index, which is described more fully in the [FIA Dataset paper](https://github.com/nealmaker/tree-growth-nf/blob/master/fia/nf-dataset-creation.pdf). It is compared to basal area and overtopping basal area using three separate models. In all of them, species, dbh, and cr are also used. A fourth model is also compared, which uses all three of these competition indexes, to see if they might complement each other.
+
+```{r psi}
+train_ba <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba)
+
+train_bal <- train %>% 
+  select(dbh_rate, spp, dbh, cr, bal)
+
+train_psi <- train %>% 
+  select(dbh_rate, spp, dbh, cr, psi)
+
+train_3comp <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, bal, psi)
+
+# Recipes
+dbh_recipe6 <- recipe(dbh_rate ~ ., data = train_ba) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe7 <- recipe(dbh_rate ~ ., data = train_bal) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe8 <- recipe(dbh_rate ~ ., data = train_psi) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe9 <- recipe(dbh_rate ~ ., data = train_3comp) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+# Train w/ RF
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.ba <- train(dbh_recipe6, train_ba, method = 'ranger', 
+                     metric=metric, trControl=control)
+  set.seed(seed)
+  fit.bal <- train(dbh_recipe7, train_bal, method = 'ranger', 
+                   metric=metric, trControl=control)
+  set.seed(seed)
+  fit.psi <- train(dbh_recipe8, train_psi, method = 'ranger', 
+                   metric=metric, trControl=control)
+  set.seed(seed)
+  fit.3comp <- train(dbh_recipe9, train_3comp, method = 'ranger', 
+                   metric=metric, trControl=control)
+  
+  stopCluster(cl)
+})})
+
+# Compare
+results2 <- resamples(list(ba = fit.ba, bal = fit.bal, psi = fit.psi, 
+                           all = fit.3comp))
+bwplot(results2, scales = scales)
+```
+
+The three competition indexes all seem to be similarly efficacious on their own, and combining them doesn't offer much improvement--if any--over just using one of them. 
+
+## Species Specific Competition Indexes
+
+Expanding on the competition indexes, the models above were compared to similar models that substitute each index with its suite of species-specific equivalents.
+
+```{r sppSpec}
+train_ba_ss <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba_ash:ba_yellow.birch)
+
+train_bal_ss <- train %>% 
+  select(dbh_rate, spp, dbh, cr, bal_ash:bal_yellow.birch)
+
+train_psi_ss <- train %>% 
+  select(dbh_rate, spp, dbh, cr, psi_ash:psi_yellow.birch)
+
+train_3comp_ss <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, bal, ba_ash:psi_yellow.birch)
+
+# Recipes
+dbh_recipe10 <- recipe(dbh_rate ~ ., data = train_ba_ss) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe11 <- recipe(dbh_rate ~ ., data = train_bal_ss) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe12 <- recipe(dbh_rate ~ ., data = train_psi_ss) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe13 <- recipe(dbh_rate ~ ., data = train_3comp_ss) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+# Train w/ RF
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.ba_ss <- train(dbh_recipe10, train_ba_ss, method = 'ranger', 
+                     metric=metric, trControl=control)
+  set.seed(seed)
+  fit.bal_ss <- train(dbh_recipe11, train_bal_ss, method = 'ranger', 
+                   metric=metric, trControl=control)
+  set.seed(seed)
+  fit.psi_ss <- train(dbh_recipe12, train_psi_ss, method = 'ranger', 
+                   metric=metric, trControl=control)
+  set.seed(seed)
+  fit.3comp_ss <- train(dbh_recipe13, train_3comp_ss, method = 'ranger', 
+                   metric=metric, trControl=control)
+  
+  stopCluster(cl)
+})})
+
+# Compare
+results3 <- resamples(list(ba = fit.ba, ba_ss = fit.ba_ss, bal = fit.bal, 
+                           bal_ss = fit.bal_ss, psi = fit.psi, 
+                           psi_ss = fit.psi_ss, all = fit.3comp,
+                           all_ss = fit.3comp_ss))
+bwplot(results3, scales = scales)
+```
+
+Species specific metrics do increase accuracy in a noticeable way, but there are not noticeable gains from using multiple species specific metrics concurrently. If one set of indexes were to be used, the species specific basal areas look to offer the best accuracy with the least computational fuss.
