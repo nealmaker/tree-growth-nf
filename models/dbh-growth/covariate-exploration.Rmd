@@ -64,7 +64,7 @@ load(temp)
 # remove trees that died and unwanted variables
 nf_fia <- nf_fia %>%
   filter(status_change == "lived",
-         !is.na(psi_mid), !is.na(ht_mid)) %>%
+         !is.na(psi_mid), !is.na(ht_mid), !is.na(dbh_var_mid)) %>%
   select(dbh_rate, spp, dbh_mid, cr_mid, ht_mid, crown_class_s, tree_class_s,
          ba_mid, bal_mid, psi_mid, spp_rich_mid, dbh_var_mid, ht_var_mid, 
          forest_type_s, stocking_s, landscape,
@@ -147,7 +147,7 @@ dbh_recipe2 <- recipe(dbh_rate ~ ., data = train) %>%
   step_scale(all_numeric(), -all_outcomes()) %>% 
   step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
   step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
-
+  
 # Train both ways w/ RF
 invisible({capture.output({
   # train in parallel to speed
@@ -195,14 +195,31 @@ invisible({capture.output({
   registerDoParallel(cl)
   
   set.seed(seed)
-  fit.varimp <- train(dbh_recipe0, train_cr, method = 'ranger', 
-                     metric=metric, trControl=trainControl("none"),
-                     importance = "impurity")
+  fit.varimp <- train(dbh_recipe0, train_varimp, method = 'ranger',
+                      importance = "permutation", metric = metric, 
+                      trControl = control)
   
   stopCluster(cl)
 })})
 
-
+mod_varimp <- varImp(fit.varimp)$importance
+mod_varimp <- tibble(covar = row.names(mod_varimp), 
+                     importance = mod_varimp$Overall)
+spp_vi <- 
+  tibble(covar = "spp", importance = sum(mod_varimp$importance[
+           which(str_detect(mod_varimp$covar, "spp_"))]))
+for_vi <- tibble(covar = "forest_type", importance = 
+                   sum(mod_varimp$importance[
+                     which(str_detect(mod_varimp$covar, "forest_type_"))]))
+land_vi <- tibble(covar = "landscape", importance = 
+                   sum(mod_varimp$importance[
+                     which(str_detect(mod_varimp$covar, "landscape_"))]))
+mod_varimp[1:18, ] %>% 
+  rbind(spp_vi, for_vi, land_vi) %>% 
+  mutate(covar = fct_reorder(covar, importance)) %>% 
+  ggplot(aes(importance, covar)) +
+  geom_segment(aes(x = 0, xend = importance, y = covar, yend = covar)) +
+  geom_point(size = 4)
 ```
 
 ## DBH to Height Ratio
@@ -434,3 +451,289 @@ bwplot(results3, scales = scales)
 ```
 
 Species specific metrics do increase accuracy in a noticeable way, but there are not noticeable gains from using multiple species specific metrics concurrently. If one set of indexes were to be used, the species specific basal areas look to offer the best accuracy with the least computational fuss.
+
+## Diversity
+
+None of the three measures of diversity looked particularly impactful from variable importance scores, but they are explored in more depth here. Models with each on their own were compared, along with a model that uses all three concurrently and another that doesn't use any of them. Like with previous comparisons, only four other covariates were used in these models: species, dbh, crown ratio, and basal area.
+
+```{r diversity}
+train_nodiv <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba)
+
+train_rich <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, spp_rich)
+
+train_dbhvar <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, dbh_var)
+
+train_htvar <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, ht_var)
+
+train_3div <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, spp_rich, dbh_var, ht_var)
+
+# Recipes
+dbh_recipe14 <- recipe(dbh_rate ~ ., data = train_nodiv) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe15 <- recipe(dbh_rate ~ ., data = train_rich) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe16 <- recipe(dbh_rate ~ ., data = train_dbhvar) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe17 <- recipe(dbh_rate ~ ., data = train_htvar) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe18 <- recipe(dbh_rate ~ ., data = train_3div) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+# Train w/ RF
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.nodiv <- train(dbh_recipe14, train_nodiv, method = 'ranger', 
+                     metric=metric, trControl=control)
+  set.seed(seed)
+  fit.rich <- train(dbh_recipe15, train_rich, method = 'ranger', 
+                     metric=metric, trControl=control)
+  set.seed(seed)
+  fit.dbhvar <- train(dbh_recipe16, train_dbhvar, method = 'ranger', 
+                   metric=metric, trControl=control)
+  set.seed(seed)
+  fit.htvar <- train(dbh_recipe17, train_htvar, method = 'ranger', 
+                   metric=metric, trControl=control)
+  set.seed(seed)
+  fit.3div <- train(dbh_recipe18, train_3div, method = 'ranger', 
+                   metric=metric, trControl=control)
+  
+  stopCluster(cl)
+})})
+
+# Compare
+results4 <- resamples(list(no_diversity = fit.nodiv, spp_richness = fit.rich, 
+                           dbh_variation = fit.dbhvar, 
+                           ht_variation = fit.htvar, all = fit.3div))
+bwplot(results4, scales = scales)
+```
+
+As expected, the diversity measures did not improve accuracy to any great degree. They do appear to be complementary, though, so that using any one of them makes no real difference, but using them together does increase the accuracy somewhat. To follow up, a comparison was made to determine the potential gain of using species richness and dbh variation concurrently, without height variation (since height is difficult to measure and has been shown to be otherwise unimportant).
+
+```{r divNoHt}
+train_divnoht <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, spp_rich, dbh_var)
+
+dbh_recipe19 <- recipe(dbh_rate ~ ., data = train_divnoht) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.divnoht <- train(dbh_recipe19, train_divnoht, method = 'ranger', 
+                     metric=metric, trControl=control)
+  
+  stopCluster(cl)
+})})
+
+# Compare
+results5 <- resamples(list(no_diversity = fit.nodiv, 
+                           richness_and_dbh_var = fit.divnoht, 
+                           all_three = fit.3div))
+bwplot(results5, scales = scales)
+```
+
+Height variability isn't really contributing to the accuracy gains in any noticeable way. If diversity measures are incorporated into a final diameter growth model, it's probably worth using both species richness and diameter variability, omitting height variability.
+
+## Geographic Location
+
+A comparison was also made to determine the importance of geographic location, defined by latitude and longitude. On their own, latitude and longitude look relatively unimportant, but mapping of dbh rates (which shows regions of increased average diameter growth) gives reason to believe that they might be important in concert.
+
+```{r geo}
+train_geo <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, lat, lon)
+
+# Recipes
+dbh_recipe20 <- recipe(dbh_rate ~ ., data = train_geo) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+# Train w/ RF
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.geo <- train(dbh_recipe20, train_geo, method = 'ranger', 
+                     metric=metric, trControl=control)
+  
+  stopCluster(cl)
+})})
+
+# Compare
+results6 <- resamples(list(no_lat_lon = fit.nodiv, lat_lon = fit.geo))
+bwplot(results6, scales = scales)
+```
+
+Latitude and longitude do increase the accuracy when used together, despite their lack of importance in isolation.
+
+## Crown Class
+
+Finally, crown class is explored in more depth because it was shown to be relatively unimportant in earlier analysis, but very important in the variable importance scores calculated above. It is not difficult to measure, but it is another thing to measure, and if it is not important it would be a good one to omit. Other measures of competition are used in the this set of models in case crown class interacts with any of them in meaningful ways.
+
+```{r crown_class}
+train_nocc <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, bal, ba_ash:ba_yellow.birch)
+
+train_cc <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, bal, ba_ash:ba_yellow.birch, crown_class)
+
+# Recipes
+dbh_recipe21 <- recipe(dbh_rate ~ ., data = train_nocc) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe22 <- recipe(dbh_rate ~ ., data = train_cc) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+# Train w/ RF
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.nocc <- train(dbh_recipe21, train_nocc, method = 'ranger', 
+                     metric=metric, trControl=control)
+  set.seed(seed)
+  fit.cc <- train(dbh_recipe22, train_cc, method = 'ranger', 
+                   metric=metric, trControl=control)
+  
+  stopCluster(cl)
+})})
+
+# Compare
+results7 <- resamples(list(no_crown_class = fit.nocc, crown_class = fit.cc))
+bwplot(results7, scales = scales)
+```
+The results support the earlier analysis showing crown ratio to be unimportant. It seems the variable importance calculations at the beginning of this working paper should be treated with caution.
+
+# Conclusion
+
+Based on the above analysis, and earlier analyses, I propose the following covariates be incorporated into a "robust" dbh growth model: species, dbh, crown ratio, basal area, species specific basal area, overtopping basal area, species richness, dbh variability, forest type, landscape setting, site class, latitude, and longitude. Site class is included despite its low importance because it's easy to incorporate, so it doesn't really cost anything. Height and stocking are excluded despite being more important because they are hard to measure, and because using height drastically reduces the amount of data available for model training. Forest type and landscape setting are intermediate in that they represent a bit of extra effort (computational expense for forest type and inventory time for landscape setting) for a modest increase in accuracy. 
+
+As a final test of these choices, three models are compared: a minimal model with only the five most important covariates, an 'ideal' model using the covariates identified above, and a 'kitchen sink' model using all the covariates in the dataset.
+
+```{r final}
+train_minimal <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, bal)
+
+train_ideal <- train %>% 
+  select(dbh_rate, spp, dbh, cr, ba, bal, ba_ash:ba_yellow.birch, spp_rich, 
+         dbh_var, forest_type, landscape, site_class, lat, lon)
+
+# Recipes
+dbh_recipe23 <- recipe(dbh_rate ~ ., data = train_minimal) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe24 <- recipe(dbh_rate ~ ., data = train_ideal) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+dbh_recipe25 <- recipe(dbh_rate ~ ., data = train) %>%  
+  step_dummy(all_nominal(), -all_outcomes()) %>% 
+  step_YeoJohnson(all_numeric(), -all_outcomes()) %>% 
+  step_center(all_numeric(), -all_outcomes()) %>% 
+  step_scale(all_numeric(), -all_outcomes()) %>% 
+  step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
+  step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
+
+# Train w/ RF
+invisible({capture.output({
+  # train in parallel to speed
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.minimal <- train(dbh_recipe23, train_minimal, method = 'ranger', 
+                     metric=metric, trControl=control)
+  set.seed(seed)
+  fit.ideal <- train(dbh_recipe24, train_ideal, method = 'ranger', 
+                   metric=metric, trControl=control)
+  set.seed(seed)
+  fit.ks <- train(dbh_recipe25, train, method = 'ranger', 
+                   metric=metric, trControl=control)
+  
+  stopCluster(cl)
+})})
+
+# Compare
+results8 <- resamples(list(minimal = fit.minimal, ideal = fit.ideal,
+                           kitchen_sink = fit.ks))
+bwplot(results8, scales = scales)
+```
+
+At the least, this last comparison does nothing to invalidate the 'ideal' covariate list described above. Despite omitting many of the most computationally and practically expensive covariates, its accuracy is only negligibly lower than the expensive, 'kitchen sink' approach.
