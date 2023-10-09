@@ -130,8 +130,8 @@ for(state in states){
 
 GRM <- lapply(states, function(x){
   read.csv(paste(x, "_TREE_GRM_COMPONENT.csv", sep = ""), header = T) %>%
-    select(TRE_CN, STATECD, DIA_BEGIN, DIA_MIDPT, DIA_END, ANN_DIA_GROWTH,
-           HT_BEGIN, HT_MIDPT, HT_END, ANN_HT_GROWTH)
+    select(TRE_CN, STATECD, DIA_BEGIN, DIA_MIDPT, DIA_END,
+           ANN_DIA_GROWTH, ANN_HT_GROWTH)
 })
 
 # Combine states' data
@@ -179,27 +179,39 @@ species_codes <-
 
 species <-
   c("fir", "other softwood", "cedar", "tamarack", "tamarack",
-    "norway spruce", "spruce", "spruce", "spruce", "spruce", "other softwood",
-    "other softwood", "red pine", "other softwood", "white pine", "scots pine",
-    "other softwood", "other softwood", "other softwood", "cedar", "hemlock",
-    "other hardwood", "soft maple", "hard maple", "striped maple", "soft maple",
-    "soft maple", "hard maple", "other hardwood", "hard maple",
-    "other hardwood", "other hardwood", "other hardwood", "other hardwood",
-    "other hardwood", "other hardwood", "other hardwood", "yellow birch",
-    "other hardwood", "other hardwood", "paper birch", "other hardwood",
-    "other hardwood", "hickory", "hickory", "hickory", "hickory", "hickory",
-    "other hardwood", "other hardwood", "other hardwood", "other hardwood",
-    "beech", "ash", "ash", "ash", "ash", "ash", "other hardwood", "butternut",
-    "other hardwood", "other hardwood", "other hardwood", "other hardwood",
-    "other hardwood", "other hardwood", "other hardwood", "other hardwood",
-    "other hardwood", "hophornbeam", "other hardwood", "other hardwood",
-    "aspen", "cottonwood", "aspen", "cottonwood", "aspen", "other hardwood",
-    "other hardwood", "black cherry", "other hardwood", "other hardwood",
-    "other hardwood", "white oak", "white oak", "red oak", "white oak",
-    "white oak", "white oak", "red oak", "red oak", "other hardwood",
-    "other hardwood", "other hardwood", "other hardwood", "other hardwood",
-    "other hardwood", "other hardwood", "other hardwood", "other hardwood",
-    "basswood", "basswood", "elm", "elm", "elm", "elm", "other hardwood")
+    "norway spruce", "white spruce", "other softwood", 
+    "other softwood", "red spruce", "other softwood", "other softwood",
+    "red pine", "other softwood", "white pine", 
+    
+    "scots pine", "other softwood", "other softwood", "other softwood",
+    "cedar", "hemlock", "other hardwood", "other hardwood", 
+    "hard maple", "striped maple", "red maple", "silver maple", 
+    "hard maple", 
+    
+    "shrubs", "hard maple", "other hardwood", "other hardwood",
+    "shrubs", "shrubs", "shrubs", "other hardwood", "other hardwood", 
+    "yellow birch", "other hardwood", "other hardwood", "paper birch", 
+    
+    "gray birch", "shrubs", "hickory", "hickory", "hickory", "hickory",
+    "hickory", "other hardwood", "other hardwood", "shrubs", "shrubs",
+    "beech", "ash", 
+    
+    "ash", "black ash", "ash", "ash", "other hardwood", "butternut",
+    "other hardwood", "other hardwood", "other hardwood", 
+    "other hardwood", "apple", "apple", "apple", 
+    
+    "other hardwood", "other hardwood", "hophornbeam", 
+    "other hardwood", "other hardwood", "aspen", "cottonwood", "aspen",
+    "cottonwood", "aspen", "shrubs", "pin cherry", "black cherry", 
+   
+    "shrubs", "shrubs", "shrubs", "white oak", "white oak", "red oak",
+    "white oak", "white oak", "white oak", "red oak", "red oak", 
+    "other hardwood", "shrubs", 
+    
+    "black willow", "shrubs", "shrubs", "shrubs", "shrubs", "shrubs", 
+    "shrubs", "basswood", "basswood", "elm", "elm", "elm", "elm", 
+    
+    "other hardwood")
 
 names(species) <- as.character(species_codes)
 
