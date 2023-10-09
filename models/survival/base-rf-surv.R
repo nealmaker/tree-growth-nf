@@ -162,4 +162,4 @@ comp %>% ggplot(aes(model, pred_time)) + geom_point()
 comp %>% ggplot(aes(model, kappa)) + geom_point()
 
 surv_mod_rf <- surv_mod50
-saveRDS(surv_mod_rf, "../base-models-rf/surv-mod-rf.rds")
+save(surv_mod_rf, file = "../base-models-rf/surv-mod-rf.rda")

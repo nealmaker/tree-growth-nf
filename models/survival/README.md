@@ -3,25 +3,25 @@ Tree mortality model for the Northern Forest
 
 ## To Do:
 
-* More exploritory analysis, especially examination of possible interactive effects.
+* More exploratory analysis, especially examination of possible interactive effects.
 * Better lit review
 * Stratify training and test sets by 'lived' so they reflect true population ratios.
 * Exploration of other model types
   * Are non-parametric models best?
-  * Would disagregation models be useful & possible? (see Zhang et al. 2011)
+  * Would disaggregation models be useful & possible? (see Zhang et al. 2011)
   * Look into splitting criteria for tree-based models. Hellinger is supposedly great for class imbalances (ranger used to? have it as an option, other common RFs don't. Gini and entropy aren't great for imbalances; extratrees isn't either, based on my experimentation.
 * A comparison of methods would be nice, using a subset of the training data to ease computation and comparing Kappas and AUROCs
-  * Logistic regression (simplist approach)
+  * Logistic regression (simplest approach)
   * Wiskittel (originally Chao?) approach with recursion to estimate when in interval each tree died
   * Cox model w/ or w/out survival
   * Random Forest with some weighted sampling scheme to deal with class imbalance and using interval as predictor
   * Support Vector Machine w/ or w/out survival
-  * Disagregation model?
-* Construct ROC curves and calculate Areas Under Curve (AUC) so results are comperable w/ Wiskittel and others.
+  * Disaggregation model?
+* Construct ROC curves and calculate Areas Under Curve (AUC) so results are comparable w/ Wiskittel and others.
 * Is AUC really better than Kappa? Why? Does AUC depend on defining a 'positive' class?
-* Do other studies treat survival as the "possitive" outcome? (only matters if they're using precission, recall, F1, maybe AUC.)
+* Do other studies treat survival as the "positive" outcome? (only matters if they're using precision, recall, F1, maybe AUC.)
 
-## Possiblities For Dealing With Censoring:
+## Possibilities For Dealing With Censoring:
 
 * Use a Cox model, which is semi-parametric, and definitely has implementations that work with interval-censored data.
 * Find a non-parametric model that can handle interval-censored data
@@ -36,7 +36,7 @@ Tree mortality model for the Northern Forest
 With the non-censored RF, can't find existing implementations with splitting criteria that work well for the big class imbalance. There are a few possibilities:
 
 * Stick with non-censored RF, but use a sampling-based approach.
-  * Some implementations have a class weight option that chooses bootstrap samples with weight proportional to class prevalance, which could make a big difference.
+  * Some implementations have a class weight option that chooses bootstrap samples with weight proportional to class prevalence, which could make a big difference.
   * Could undersample "lived" or oversample "died" in training data.
   * There are more complex synthetic sampling techniques which make new "died" observations based on knn of existing observations.
 * Try SVM, which can also use balanced class weights and might have implementations that deal with censoring directly.
