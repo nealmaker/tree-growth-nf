@@ -1,6 +1,6 @@
 ---
 title: "DBH Growth Model for the Northern Forest"
-subtitle: "using a machine learning approach"
+subtitle: "using a machine learning approach and a curated list of covariates"
 author: "Neal Maker"
 output: html_notebook
 ---
@@ -37,13 +37,14 @@ load(temp)
 
 # remove trees that died and unwanted variables
 nf_fia <- nf_fia %>%
-  filter(status_change == "lived") %>%
-  select(dbh_rate, spp, dbh_mid, cr_mid, crown_class_s, tree_class_s,
-         forest_type_s, stocking_s, landscape,
-         site_class, slope, aspect, lat, lon, elev, ba_ash:bal_yellow.birch,
-         interval, plot) %>%
-  rename(dbh = dbh_mid, cr = cr_mid, crown_class = crown_class_s,
-         tree_class = tree_class_s, forest_type = forest_type_s, stocking = stocking_s)
+  filter(status_change == "lived", !is.na(spp_rich_mid), 
+         !is.na(dbh_var_mid)) %>%
+  select(dbh_rate, spp, dbh_mid, cr_mid, bal_mid, spp_rich_mid, 
+         dbh_var_mid, forest_type_s, landscape, site_class, lat, lon,
+         ba_ash:ba_yellow.birch, interval, plot) %>%
+  rename(dbh = dbh_mid, cr = cr_mid, bal = bal_mid,
+         spp_rich = spp_rich_mid, dbh_var = dbh_var_mid, 
+         forest_type = forest_type_s)
 })})
 ```
 
@@ -51,13 +52,13 @@ Forest Inventory and Analysis data were used from the US Northern Forest region.
 
 Preliminary analysis using [nonlinear least squares models](https://github.com/nealmaker/tree-growth-nf/blob/master/models/dbh-growth/nls-model.Rmd) demonstrated the value of using the annualized diameter growth rate as a response variable, instead of using the change in diameter over the entire remeasurement period. For this reason, the annualized diameter at breast height ($DBH\_rate$) was used, and mid-period values were used for mutable individual tree attributes to better reflect the average conditions over the remeasurement period. These were calculated as the average of the starting and ending values.
 
-The data include `r ncol(nf_fia) - 2` potential predictors (features), which include individual tree attributes as well as plot-level attributes and site attributes. Three of the predictors are non-ordinal categorical variables, three are ordinal categorical variables, and the rest are numeric. Many of the numeric predictors are species-specific basal areas and species-specific overtopping basal areas. In aggregate, these fully describe basal area and overtopping basal area for each observation. Total basal area and overtopping basal area were therefore omitted from the covariates to prevent perfect collinearities. 
+The data include `r ncol(nf_fia) - 2` potential predictors (features), which include individual tree attributes as well as plot-level attributes and site attributes. Three of the predictors are non-ordinal categorical variables, one is an ordinal categorical variable, and the rest are numeric. Many of the numeric predictors are species-specific basal areas. In aggregate, these fully describe basal area for each observation and total basal area was omitted from the covariates to prevent perfect collinearities.
 
 ```{r split, cache=TRUE}
 # test set is 20% of full dataset
 test_size <- .2
 
-# define test set based on plots (to make it truely independent)
+# define test set based on plots (to make it truly independent)
 set.seed(10)
 test_plots <- sample(unique(nf_fia$plot),
                      size = round(test_size * length(unique(nf_fia$plot))),
@@ -107,12 +108,12 @@ metric <- "RMSE"
 ```{r preprocTest}
 # Recipes with and without standardizing dummies 
 dbh_recipe1 <- recipe(dbh_rate ~ ., data = train) %>% 
-  step_YeoJohnson("dbh", "cr", "crown_class", "tree_class", "stocking",
-                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
-  step_center("dbh", "cr", "crown_class", "tree_class", "stocking",
-                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
-  step_scale("dbh", "cr", "crown_class", "tree_class", "stocking",
-                  "site_class", "slope", "aspect", "lat", "lon", "elev") %>% 
+  step_YeoJohnson("dbh", "cr", "bal", "spp_rich", "dbh_var",
+                  "site_class", "lat", "lon") %>% 
+  step_center("dbh", "cr", "bal", "spp_rich", "dbh_var",
+                  "site_class", "lat", "lon") %>% 
+  step_scale("dbh", "cr", "bal", "spp_rich", "dbh_var",
+                  "site_class", "lat", "lon") %>% 
   step_dummy(all_nominal(), -all_outcomes()) %>% 
   step_zv(all_predictors()) %>% # to remove any dummies with no occurrence 
   step_corr(all_predictors(), threshold = 0.95) # Pearson's corr is default
@@ -155,7 +156,7 @@ dbh_recipe <- dbh_recipe1
 rm(fit.dum, fit.nodum, dbh_recipe1, dbh_recipe2)
 ```
 
-Finally, highly correlated predictors were filtered, to cut down on features to speed training and prevent problems with linear regression-based methods. The only features that are potentially highly correlated are basal areas and overtopping basal areas specific to uncommon species. For example, the basal area of cottonwood and the overtopping basal area of cottonwood are approximately 95% correlated in the training data, because the only cottonwoods observed came from a few cottonwood filled plots.
+Finally, highly correlated predictors were filtered, to cut down on features to speed training and prevent problems with linear regression-based methods. The only features that are potentially highly correlated are basal areas specific to uncommon species. For example, the basal area of cottonwood is approximately 95% correlated in the training data, because the only cottonwoods observed came from a few cottonwood filled plots.
 
 ```{r spotChecks, cache=TRUE}
 invisible({capture.output({
@@ -320,7 +321,7 @@ Of the non-linear models, the gradient boosting machine (gbm) may be the best co
 plot(fit.gbm)
 ```
 
-# Final Model
+# Building a Gradient Boosting Machine
 
 In order to optimize its accuracy, the gradient boosting machine was re-tuned following the process outlined by Boehmke and Greenwell in _Hands-On Machine Learning with R_ (2020, section 12.3.3). Unfortunately, the tuning depends on the size of the training data, so all of the training data had to be used, which makes the process very slow. Five-fold cross validation was used instead of 10-fold to decrease the training time.
 
@@ -337,7 +338,7 @@ invisible({capture.output({
   fit.gbm1 <- train(dbh_recipe, train, method = 'gbm', metric=metric,
                     trControl=control2, verbose=FALSE,
                     tuneGrid = expand.grid(shrinkage = .5,
-                                           n.trees = seq(14000, 26000, by = 3000),
+                                           n.trees = seq(2000, 80000, by = 2000),
                                            interaction.depth = 3, 
                                            n.minobsinnode = 10)) 
   
@@ -359,7 +360,7 @@ invisible({capture.output({
                    tuneGrid = expand.grid(shrinkage = fit.gbm1$bestTune$shrinkage,
                                           n.trees = fit.gbm1$bestTune$n.trees,
                                           interaction.depth = c(2, 4, 6, 8),
-                                          n.minobsinnode = c(5, 10, 15)))
+                                          n.minobsinnode = c(5, 10, 15, 20)))
   
   stopCluster(cl)
 })})
@@ -368,43 +369,104 @@ plot(fit.gbm2)
 ```
 
 ```{r gbmLR}
-# fit.gbm2 TOOK SEVERAL DAYS. LOWERING LEARNING RATE WOULD BE EVEN SLOWER.
-# LEAVE THIS PART OUT.
+# fit.gbm2 TOOK SEVERAL DAYS. LOWERING LEARNING RATE WILL BE EVEN SLOWER.
 
 # Now can try lower learning rate (shrinkage) and retrain boosting iterations
-# invisible({capture.output({
-# cl <- makePSOCKcluster(10)
-# registerDoParallel(cl)
-# 
-# set.seed(seed)
-# fit.gbm3 <- train(dbh_recipe2, train, method = 'gbm', metric=metric,
-#                  trControl=control2, verbose=FALSE,
-#                  tuneGrid = expand.grid(shrinkage = 0.01,
-#                                         n.trees = c(20000, 30000, 40000),
-#                                         interaction.depth = 3,
-#                                         n.minobsinnode = 15))
-# 
-# stopCluster(cl)
-# })})
-# 
-# plot(fit.gbm3)
-# 
-# invisible({capture.output({
-# cl <- makePSOCKcluster(10)
-# registerDoParallel(cl)
-# 
-# set.seed(seed)
-# fit.gbm4 <- train(dbh_recipe2, train, method = 'gbm', metric=metric,
-#                  trControl=control2, verbose=FALSE,
-#                  tuneGrid = expand.grid(shrinkage = 0.01,
-#                                         n.trees = c(80000, 120000),
-#                                         interaction.depth = 3,
-#                                         n.minobsinnode = 15))
-# 
-# stopCluster(cl)
-# })})
-# 
-# plot(fit.gbm4)
+invisible({capture.output({
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.gbm3 <- 
+    train(dbh_recipe, train, method = 'gbm', metric=metric,
+          trControl=control2, verbose=FALSE,
+          tuneGrid = expand.grid(shrinkage = 0.01,
+                                 n.trees = c(20000, 40000, 60000, 80000),
+                                 interaction.depth = 
+                                   fit.gbm2$bestTune$interaction.depth,
+                                 n.minobsinnode = 
+                                   fit.gbm2$bestTune$n.minobsinnode))
+  
+  stopCluster(cl)
+})})
+
+plot(fit.gbm3)
+```
+
+```{r gbmLR2}
+# TAKES SEVERAL DAYS. 
+
+# redo b/c didn't reach minimum RMSE
+invisible({capture.output({
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.gbm4 <- 
+    train(dbh_recipe, train, method = 'gbm', metric=metric,
+          trControl=control2, verbose=FALSE,
+          tuneGrid = expand.grid(shrinkage = 0.01,
+                                 n.trees = c(80000, 100000, 120000, 140000),
+                                 interaction.depth = 
+                                   fit.gbm2$bestTune$interaction.depth,
+                                 n.minobsinnode = 
+                                   fit.gbm2$bestTune$n.minobsinnode))
+  
+  stopCluster(cl)
+})})
+
+plot(fit.gbm4)
+```
+```{r gbmLR3}
+# TAKES SEVERAL DAYS. 
+
+# redo b/c didn't reach minimum RMSE
+invisible({capture.output({
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.gbm5 <- 
+    train(dbh_recipe, train, method = 'gbm', metric=metric,
+          trControl=control2, verbose=FALSE,
+          tuneGrid = expand.grid(shrinkage = 0.01,
+                                 n.trees = c(160000, 200000, 240000),
+                                 interaction.depth = 4,
+                                   #fit.gbm2$bestTune$interaction.depth,
+                                 n.minobsinnode = 20))
+                                   #fit.gbm2$bestTune$n.minobsinnode))
+  
+  stopCluster(cl)
+})})
+
+plot(fit.gbm5)
+```
+
+```{r gbmLR4}
+# TAKES ONE WEEK. 
+
+# redo b/c didn't reach minimum RMSE
+invisible({capture.output({
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.gbm6 <- 
+    train(dbh_recipe, train, method = 'gbm', metric=metric,
+          trControl=control2, verbose=FALSE,
+          tuneGrid = expand.grid(shrinkage = 0.01,
+                                 n.trees = c(300000, 400000),
+                                 interaction.depth = 4,
+                                   #fit.gbm2$bestTune$interaction.depth,
+                                 n.minobsinnode = 20))
+                                   #fit.gbm2$bestTune$n.minobsinnode))
+  
+  stopCluster(cl)
+})})
+
+plot(fit.gbm6)
 ```
 
 ``` {r gbmFinal}
@@ -417,12 +479,12 @@ invisible({capture.output({
   fit.gbm.final <- 
     train(dbh_recipe, train, method = 'gbm', metric=metric,
           trControl = trainControl(method = "none"), verbose = FALSE,
-          tuneGrid = expand.grid(shrinkage = fit.gbm2$bestTune$shrinkage,
-                                 n.trees = fit.gbm2$bestTune$n.trees,
+          tuneGrid = expand.grid(shrinkage = fit.gbm6$bestTune$shrinkage,
+                                 n.trees = fit.gbm6$bestTune$n.trees,
                                  interaction.depth = 
-                                   fit.gbm2$bestTune$interaction.depth,
+                                   fit.gbm6$bestTune$interaction.depth,
                                  n.minobsinnode = 
-                                   fit.gbm2$bestTune$n.minobsinnode))
+                                   fit.gbm6$bestTune$n.minobsinnode))
   
   stopCluster(cl)
 })})
@@ -437,9 +499,118 @@ gbmTimes <-
   })
 ```
 
-This final version of the gradient boosting machine achieves a cross-validation RMSE of `r round(min(fit.gbm2$results[,5]), 4)` inches. It uses `r round(lobstr::obj_size(fit.gbm.final)/1000000)` megabytes in memory, and takes an average of `r round(mean(gbmsubTimes), 2)` seconds to make one thousand predictions.
+This final version of the gradient boosting machine achieves a cross-validation RMSE of `r round(min(fit.gbm6$results[,5]), 4)` inches. It uses `r round(lobstr::obj_size(fit.gbm.final)/1000000)` megabytes in memory, and takes an average of `r round(mean(gbmTimes), 2)` seconds to make one thousand predictions.
 
 ``` {r save}
 saveRDS(fit.gbm.final, file = "dbh-growth-model-gbm.rds")
 ```
 
+# Lasso Regression as a Slim Alternative
+
+The results above show that the gradient boosting machine did not scale well when applied to the full training set. While the accuracy did improve a fair bit compared to the model trained on a subset of the data, the model's size and prediction time increased many-fold, creating a model that will be difficult to use. Below, we train a regularized parametric model--quantile regression with lasso penalty--on all of the training data, which we expect will be substantially smaller and faster than the gradient boosting machine, but not as accurate.
+
+```{r lasso}
+invisible({capture.output({
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.lasso1 <- 
+    train(dbh_recipe, train, method = 'rqlasso', metric=metric,
+          trControl=control, verbose=FALSE,
+          tuneGrid = expand.grid(lambda = seq(0, .005, .001)))
+  
+  stopCluster(cl)
+})})
+
+plot(fit.lasso1)
+```
+``` {r lassoFinal}
+# Refit without resampling, to get smaller train object
+invisible({capture.output({
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.lasso.final <- 
+    train(dbh_recipe, train, method = 'rqlasso', metric=metric,
+          trControl = trainControl(method = "none"), verbose = FALSE,
+          tuneGrid = expand.grid(lambda = fit.lasso1$bestTune$lambda))
+  
+  stopCluster(cl)
+})})
+```
+
+```{r lassoTimes}
+lassoTimes <- 
+  sapply(1:30, function(k) {
+    system.time(predict(fit.lasso.final,
+                        newdata = train[sample(1:nrow(train), 1000,
+                                               replace = F), ]))[[3]]
+  })
+```
+
+This final version of quantile regression with lasso achieves a cross-validation RMSE of `r round(min(fit.lasso1$results[,2]), 4)` inches. It uses `r round(lobstr::obj_size(fit.lasso.final)/1000000)` megabytes in memory, and takes an average of `r round(mean(lassoTimes), 2)` seconds to make one thousand predictions.
+
+``` {r saveLasso}
+saveRDS(fit.lasso.final, file = "dbh-growth-model-lasso.rds")
+```
+
+As expected, the lasso is much smaller and faster than the gradient boosting machine (`r round(lobstr::obj_size(fit.gbm.final)/lobstr::obj_size(fit.lasso.final),1)` times smaller and `r round(mean(gbmTimes)/mean(lassoTimes))` times faster), but is not quite as accurate (with an RMSE of `r round(min(fit.lasso1$results[,2]), 4)` inches, compared to the boosting machine's RMSE of `r round(min(fit.gbm6$results[,5]), 4)` inches). 
+
+The disadvantage of the lasso is most likely its inability to account for interactions between predictors. While the gradient boosting machine's advantage in overall accuracy is relatively small, Maker and Foppert (2021) demonstrated that complex interactions do drive diameter growth trends for trees in less common situations and that nonparametric models like the gradient boosting machine can make much better predictions in those cases. In other words, the gradient boosting machine is probably making a big difference for a minority of trees. 
+
+# Compromising With a Random Forest
+
+Results from the spot checks indicate that a random forest could offer a reasonable compromise between the gradient boosting machine and the lasso regression. Random forests are nonparametric and capable of accounting for interactions, which should help the accuracy, and I suspect they scale better than the gradient boosting machine, hopefully keeping the size and prediction speed down.
+
+```{r rf}
+invisible({capture.output({
+  library(doParallel)
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.rf1 <- 
+    caret::train(dbh_recipe, train, method = 'ranger', metric=metric,
+          trControl=control2, verbose=FALSE)
+  
+  stopCluster(cl)
+})})
+
+plot(fit.rf1)
+```
+
+``` {r rfFinal}
+# Refit without resampling, to get smaller train object
+invisible({capture.output({
+  cl <- makePSOCKcluster(10)
+  registerDoParallel(cl)
+  
+  set.seed(seed)
+  fit.rf.final <- 
+    train(dbh_recipe, train, method = 'ranger', metric=metric,
+          trControl = trainControl(method = "none"), verbose = FALSE,
+          tuneGrid = expand.grid(mtry = fit.rf1$bestTune$mtry,
+                                 min.node.size = fit.rf1$bestTune$min.node.size,
+                                 splitrule = fit.rf1$bestTune$splitrule))
+  
+  stopCluster(cl)
+})})
+```
+
+```{r rfTimes}
+rfTimes <- 
+  sapply(1:30, function(k) {
+    system.time(predict(fit.rf.final,
+                        newdata = train[sample(1:nrow(train), 1000,
+                                               replace = F), ]))[[3]]
+  })
+```
+
+This final version of the linear support vector machine achieves a cross-validation RMSE of `r round(min(fit.rf1$results[,2]), 4)` inches. It uses `r round(lobstr::obj_size(fit.rf.final)/1000000)` megabytes in memory, and takes an average of `r round(mean(rfTimes), 2)` seconds to make one thousand predictions.
+
+``` {r saveRf}
+saveRDS(fit.rf.final, file = "dbh-growth-model-rf.rds")
+```
