@@ -1,6 +1,6 @@
 library("tidyverse")
 library("caret")
-
+library("ranger")
 
 MAE <- function(true_ratings, predicted_ratings){
   sum(abs(predicted_ratings - true_ratings)) / length(true_ratings)
@@ -155,4 +155,4 @@ comp %>% ggplot(aes(model, pred_time)) + geom_point()
 comp %>% ggplot(aes(model, rmse)) + geom_point()
 
 cr_mod_rf <- cr_mod50
-saveRDS(cr_mod_rf, "../base-models-rf/cr-mod-rf.rds")
+save(cr_mod_rf, file = "../base-models-rf/cr-mod-rf.rda")

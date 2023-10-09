@@ -1,5 +1,6 @@
 library("tidyverse")
 library("caret")
+library("ranger")
 
 temp <- tempfile()
 download.file(
@@ -145,4 +146,4 @@ comp %>% ggplot(aes(model, pred_time)) + geom_point()
 comp %>% ggplot(aes(model, rmse)) + geom_point()
 
 htgrow_mod_rf <- htgrow_mod50
-saveRDS(htgrow_mod_rf, "../base-models-rf/htgrow-mod-rf.rds")
+save(htgrow_mod_rf, file = "../base-models-rf/htgrow-mod-rf.rda")
