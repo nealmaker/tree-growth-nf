@@ -1,4 +1,4 @@
-# tree-growth-nf (hi)
+# tree-growth-nf
 Creation of tree growth models for the US Northern Forest using a machine learning approach with FIA data.
 
 ## Some notes
