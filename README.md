@@ -1,5 +1,5 @@
 # tree-growth-nf
-Creation of tree growth models for the US Northern Forest using a machine learning approach with FIA data.NEW!!!!!!!!!!
+Creation of tree growth models for the US Northern Forest using a machine learning approach with FIA data.
 
 ## Some notes
 - dbh_rate is calculated by fia. It is essentially a prediction of growth based on the starting diameter, crown ratio, etc., etc. and is not (dbh_e - dbh_s)/interval.
