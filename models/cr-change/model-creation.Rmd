@@ -41,7 +41,8 @@ nf_fia <- nf_fia %>%
   filter(status_change == "lived") %>% 
   select(cr_rate, spp, dbh_mid, cr_mid, crown_class_s, tree_class_s,
          ba_mid, bal_mid, forest_type_s, stocking_s, landscape, 
-         site_class, slope, aspect, lat, lon, elev, ba_ash:bal_yellow.birch, 
+         site_class, slope, aspect, lat, lon, elev, spp_rich, 
+         dbh_var, ba_ash:bal_yellow.birch, 
          plot) %>% 
   rename(dbh = dbh_mid, cr = cr_mid, crown_class = crown_class_s,
          tree_class = tree_class_s, ba = ba_mid, bal = bal_mid,
@@ -636,6 +637,7 @@ y_hat <- predict(fit.best, newdata = test)
 RMSE <- function(true_ratings, predicted_ratings){
   sqrt(mean((true_ratings - predicted_ratings)^2))
 }
+
 
 model_rmse <- RMSE(testy, y_hat)
 ```
