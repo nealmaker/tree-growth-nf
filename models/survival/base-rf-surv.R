@@ -42,7 +42,9 @@ testy <- surv[index]
 # Upsampling minority class (died) w/ SMOTE to make a more balanced dataset
 train_all <- cbind(data.frame(y = trainy), train)
 library("ROSE")
-synthetic <- ROSE(y ~ ., train_all, seed = 3214)
+# I was using p = .5 (died and lived equal), but model was doubling total amount
+# of mortality, now trying with p = .2
+synthetic <- ROSE(y ~ ., train_all, p = .2, seed = 3214) 
 train <- synthetic$data
 trainy <- train[, 1]
 train <- train[, -1]
